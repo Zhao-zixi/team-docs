@@ -14,6 +14,7 @@ import { validateBody } from './validation.js';
 const IdSchema = z.string().uuid();
 const TitleSchema = z.string().min(1).max(200).refine((value) => value.trim().length > 0).refine((value) => !/[\u0000-\u001f\u007f]/.test(value));
 const SearchQuerySchema = z.object({ q: z.string().trim().min(1).max(100), spaceId: IdSchema.optional(), offset: z.coerce.number().int().min(0).max(10000000).default(0), limit: z.coerce.number().int().min(1).max(100).default(100) }).strict();
+const RevisionListQuerySchema = z.object({ offset: z.coerce.number().int().min(0).max(10000000).default(0), limit: z.coerce.number().int().min(1).max(100).default(100), metadataOnly: z.coerce.boolean().optional().default(false) }).strict();
 const GrantSchema = z.object({ userId: IdSchema, role: z.enum(['viewer', 'editor']) }).strict();
 const GrantsSchema = z.array(GrantSchema).max(500).superRefine((grants, context) => {
   const users = new Set<string>();
@@ -365,14 +366,27 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const { id } = request.params as Params;
     const user = actor(db, request);
     visibleDocument(db, user.id, id!);
-    const page = parsePage(request.query);
-    const revisions = db.prepare(`SELECT r.id,r.version,r.title,r.body,r.created_at AS createdAt,r.author_name AS authorName
-      FROM revisions r WHERE r.document_id=? ORDER BY r.version DESC`).all(id) as unknown as Revision[];
-    if (!request.agentPrincipal && !hasExplicitPage(request.query)) return { revisions };
+    const parsed = RevisionListQuerySchema.safeParse(request.query);
+    if (!parsed.success) throw badRequest('分页参数无效。');
+    const page = { offset: parsed.data.offset, limit: parsed.data.limit };
+    const metadataOnly = request.agentPrincipal !== undefined || parsed.data.metadataOnly;
+    const revisions = metadataOnly
+      ? db.prepare(`SELECT r.id,r.version,r.title,r.created_at AS createdAt,r.author_name AS authorName FROM revisions r WHERE r.document_id=? ORDER BY r.version DESC`).all(id) as Array<Omit<Revision, 'body'>>
+      : db.prepare(`SELECT r.id,r.version,r.title,r.body,r.created_at AS createdAt,r.author_name AS authorName FROM revisions r WHERE r.document_id=? ORDER BY r.version DESC`).all(id) as unknown as Revision[];
+    if (!request.agentPrincipal && !hasExplicitPage(request.query) && !parsed.data.metadataOnly) return { revisions };
     const pageResult = paginate(revisions, page);
     return { revisions: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
+  app.get('/documents/:id/revisions/:revisionId', { config: { agentAccess: { scope: 'read', operation: 'document.read', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(RevisionParamsSchema) }, async (request) => {
+    const { id, revisionId } = request.params as Params;
+    const user = actor(db, request);
+    visibleDocument(db, user.id, id!);
+    const revision = db.prepare(`SELECT r.id,r.version,r.title,r.body,r.created_at AS createdAt,r.author_name AS authorName FROM revisions r WHERE r.id=? AND r.document_id=?`)
+      .get(revisionId, id) as Revision | undefined;
+    if (!revision) throw notFound();
+    return { revision };
+  });
   app.post('/documents/:id/revisions/:revisionId/restore', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: [validateParams(RevisionParamsSchema), validateBody(RestoreSchema)] }, async (request) => {
     const { id, revisionId } = request.params as Params;
     const input = request.body as z.infer<typeof RestoreSchema>;

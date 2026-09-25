@@ -91,13 +91,14 @@ interface Document extends DocumentSummary {
 | DELETE `/documents/:id` | — | `{ok:true}` |
 | GET `/documents/:id/access` | — | `{visibility,grants}` |
 | PUT `/documents/:id/access` | `{visibility,grants}` | `{document}` |
-| GET `/documents/:id/revisions` | — | `{revisions: Revision[]}` |
+| GET `/documents/:id/revisions` | `{offset?,limit?,metadataOnly?}` | `{revisions,hasMore?,nextOffset?}`；PAT 默认仅元数据，不取正文 |
+| GET `/documents/:id/revisions/:revisionId` | — | `{revision: Revision}`；当前文档 ACL 与 revision/document 关联同时验证 |
 | POST `/documents/:id/revisions/:revisionId/restore` | `{version}` | `{document}` |
 | GET `/documents/:id/export` | — | `text/markdown` 下载 |
 | GET `/teams/:teamId/search?q=...` | — | `{documents}`，仅可见摘要 |
 | GET `/teams/:teamId/audit` | — | `{events}`，仅 owner/admin |
 
-`Revision` 为 `{id,version,title,body,createdAt,authorName}`。每次内容修改与恢复均生成新版本历史快照；恢复和删除仅 owner/admin。Document ACL 仅 owner/admin 可设置；创建 restricted 文档也只允许 owner/admin。Document `inherit` 使用空间可访问能力；`restricted` 要求用户既能进入空间又有 document grant。空间权限与文档权限逐层取最小值，document grant 不得绕过 restricted 空间。`canEdit` 与 `canManage` 必须按当前请求的 ACL 计算；文档管理（ACL、删除、恢复）仅 owner/admin。所有正文、列表、搜索、历史及导出在服务端按当前 ACL 过滤，无权资源返回 404。
+`Revision` 为 `{id,version,title,body,createdAt,authorName}`。cookie 客户端历史列表未请求分页或metadataOnly时保持原行为返回正文；PAT 历史列表SQL不读取正文，需读取某一版本时调用固定单版本路径。每次内容修改与恢复均生成新版本历史快照；恢复和删除仅 owner/admin。Document ACL 仅 owner/admin 可设置；创建 restricted 文档也只允许 owner/admin。Document `inherit` 使用空间可访问能力；`restricted` 要求用户既能进入空间又有 document grant。空间权限与文档权限逐层取最小值，document grant 不得绕过 restricted 空间。`canEdit` 与 `canManage` 必须按当前请求的 ACL 计算；文档管理（ACL、删除、恢复）仅 owner/admin。所有正文、列表、搜索、历史及导出在服务端按当前 ACL 过滤，无权资源返回 404。
 
 ## 角色与分层权限摘要
 

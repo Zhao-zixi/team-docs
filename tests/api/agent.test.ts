@@ -226,6 +226,7 @@ describe('Agent credentials and REST bearer policy', () => {
     const patRevisions = await bearer(issued.token, 'GET', `/api/documents/${ids.doc}/revisions?offset=100&limit=100`);
     expect(patRevisions.statusCode).toBe(200);
     expect(patRevisions.json().revisions).toHaveLength(6);
+    expect(patRevisions.json().revisions.every((revision: Record<string, unknown>) => !('body' in revision))).toBe(true);
     expect(spaces.statusCode).toBe(200);
     expect(spaces.json().spaces).toHaveLength(7);
     expect(spaces.json().hasMore).toBe(false);
@@ -242,6 +243,25 @@ describe('Agent credentials and REST bearer policy', () => {
     expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&spaceId=${ids.remoteSpace}`)).statusCode).toBe(404);
     expect(search.json().documents).toHaveLength(7);
     expect(search.json().documents.every((doc: { spaceId: string }) => [ids.space, ids.otherSpace].includes(doc.spaceId))).toBe(true);
+  });
+  it('reads one revision by document and revision ID while rechecking ACL', async () => {
+    const ownRevision = db.prepare('SELECT id FROM revisions WHERE document_id=? ORDER BY version DESC LIMIT 1').get(ids.doc) as { id: string };
+    const otherRevision = db.prepare('SELECT id FROM revisions WHERE document_id=? ORDER BY version DESC LIMIT 1').get(ids.otherDoc) as { id: string };
+    const ownerToken = await issue('owner', { scope: 'read' });
+    const mismatch = await bearer(ownerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${otherRevision.id}`);
+    expect(mismatch.statusCode).toBe(404);
+
+    const viewerToken = await issue('viewer', { scope: 'read', spaceId: ids.space });
+    const grant = await sessionRequest('owner', 'PUT', `/api/documents/${ids.doc}/access`, { visibility: 'restricted', grants: [{ userId: ids.viewer, role: 'viewer' }] });
+    expect(grant.statusCode).toBe(200);
+    const readable = await bearer(viewerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${ownRevision.id}`);
+    expect(readable.statusCode).toBe(200);
+    expect(readable.json().revision).toHaveProperty('body');
+    const revoke = await sessionRequest('owner', 'PUT', `/api/documents/${ids.doc}/access`, { visibility: 'restricted', grants: [] });
+    expect(revoke.statusCode).toBe(200);
+    const denied = await bearer(viewerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${ownRevision.id}`);
+    expect(denied.statusCode).toBe(404);
+    expect(denied.body).not.toContain('Needle Alpha');
   });
   it('prevents write PATs from assigning document ACLs through REST', async () => {
     const writeToken = await issue('editor', { scope: 'write', spaceId: ids.space });
