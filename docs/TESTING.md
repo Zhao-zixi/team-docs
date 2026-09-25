@@ -18,3 +18,16 @@
 14. **Markdown/XSS/无损转换**：含 script、事件属性、javascript: 链接及不支持脚注/参考链接的 Markdown，保存/读取/导出时源码按输入规范原样保留，渲染不得产生可执行 HTML/危险 href；不支持的 rich 转换阻断且不 PATCH 覆写。前端测试切换模式正文原样、复杂表格/HTML/脚注阻断、409 时保留本地草稿。风险：存储型 XSS 或静默丢稿。
 
 部署测试须注明 Docker 是否存在。当前开发机未安装 Docker，Compose 镜像与 NAS 实机验证应在执行后如实记录，不能标为已通过。
+
+## 本轮验证记录
+
+- `npm run typecheck`：通过，前端与服务端 TypeScript 检查均通过。
+- `npm test`：Vitest 46/46 通过，ops 3/3 通过。
+- `npm run test:e2e`：Playwright 生产API端到端 1/1 通过，覆盖受限空间/文档权限、无权404、版本冲突、退出竞态和375px视口菜单。
+- `npm run build`：client/server 生产构建通过；Vite提示主JS chunk约928 KB，超过500 KB建议阈值。
+- 生产入口 smoke：fresh `dist/server/index.js` 服务 health 200、SPA静态文件可用；API no-store、CSP、X-Frame-Options、nosniff正确，HTTP环境未发送HSTS。
+- 本机开发 smoke：隔离 DATA_DIR 下Vite页面200、setup/login、文档创建与更新/回读通过；Ctrl+C移除实例锁；同一DB重启后登录和正文回读通过。
+- 文件数据库恢复集成测试：覆盖WAL在线备份、app重开、普通viewer的受限space/doc grant恢复、旧session失效和待接受邀请撤销。
+- 锁测试：既有锁（含陈旧和损坏锁）拒绝自动删除；确认所有实例已停止后需手动清理。
+- `npm audit`：0 vulnerabilities。
+- Docker CLI不可用；未构建/启动镜像，NAS设备未实测。
