@@ -93,7 +93,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
       const targetId = (policy?.documentParam && params[policy.documentParam])
         ?? (policy?.spaceParam && params[policy.spaceParam])
         ?? (policy?.teamParam && params[policy.teamParam])
-        ?? principal.spaceId
+        ?? (request.url.startsWith('/mcp') ? undefined : principal.spaceId)
         ?? principal.teamId;
       db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json)
         VALUES(?,?,?,?,?,?,?,?)`).run(randomUUID(), principal.teamId, principal.userId,
