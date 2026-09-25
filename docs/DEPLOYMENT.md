@@ -2,6 +2,8 @@
 
 TeamShelf 由 Node.js 24 LTS 提供同源 API 和网页，数据保存在 `DATA_DIR/teamshelf.sqlite`。服务按单实例运行，SQLite 文件应放在 NAS 的本地 Docker 命名卷中。不要把数据库放到 SMB/NFS 共享目录，也不要启动多个应用副本。
 
+GitHub CI/CD、不可变 GHCR digest 与 NAS 自动更新步骤见[CI/CD 与 NAS 部署指南](CICD.md)。
+
 ## 本机启动
 
 需要 Node.js 24 和 npm。在项目目录运行：

@@ -1,0 +1,141 @@
+name: Deploy verified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful CI run ID from a push to main
+        required: true
+        type: string
+      validate_only:
+        description: Verify trusted release metadata without contacting a NAS runner
+        required: true
+        default: true
+        type: boolean
+      init_volume:
+        description: Explicitly authorize initialization of a verified empty NAS volume on deployment
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: teamshelf-nas-production
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Verify successful main release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image_ref: ${{ steps.metadata.outputs.image_ref }}
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      deploy: ${{ steps.gate.outputs.deploy }}
+      runner_label: ${{ steps.gate.outputs.runner_label }}
+      env_file: ${{ steps.gate.outputs.env_file }}
+      init_volume: ${{ steps.gate.outputs.init_volume }}
+    steps:
+      - name: Validate dispatch source and release run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          DISPATCH_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DISPATCH_REF" == "refs/heads/main" ]] || { echo "Dispatch must target main." >&2; exit 1; }
+          [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || { echo "run_id must be a numeric Actions run ID." >&2; exit 1; }
+          gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}" > "$RUNNER_TEMP/source-run.json"
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import fs from 'node:fs';
+          const run = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/source-run.json`, 'utf8'));
+          if (run.repository?.full_name?.toLowerCase() !== process.env.REPOSITORY.toLowerCase()) throw new Error('Source run belongs to a different repository.');
+          if (run.path !== '.github/workflows/ci.yml' || run.event !== 'push' || run.head_branch !== 'main') throw new Error('Source run is not the expected CI workflow on main.');
+          if (run.status !== 'completed' || run.conclusion !== 'success' || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw new Error('Source CI run is not successful or has invalid commit metadata.');
+          console.log(`source_sha=${run.head_sha}`);
+          NODE
+      - name: Download only the verified run's release metadata
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release-metadata
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-metadata
+      - name: Validate immutable image reference
+        id: metadata
+        env:
+          EXPECTED_SHA: ${{ steps.run.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import fs from 'node:fs';
+          const metadata = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/release-metadata/release-metadata.json`, 'utf8'));
+          if (metadata.sourceSha !== process.env.EXPECTED_SHA) throw new Error('Release metadata SHA does not match the successful CI run.');
+          if (!/^ghcr\.io\/zhao-zixi\/team-docs@sha256:[a-f0-9]{64}$/.test(metadata.imageRef)) throw new Error('Release metadata has an invalid image reference.');
+          console.log(`source_sha=${metadata.sourceSha}`);
+          console.log(`image_ref=${metadata.imageRef}`);
+          NODE
+      - name: Require explicit NAS configuration only for deployment
+        id: gate
+        env:
+          VALIDATE_ONLY: ${{ inputs.validate_only }}
+          NAS_READY: ${{ vars.NAS_DEPLOY_READY }}
+          RUNNER_LABEL: ${{ vars.NAS_RUNNER_LABEL }}
+          ENV_FILE: ${{ vars.TEAMSHELF_ENV_FILE }}
+          INIT_VOLUME: ${{ inputs.init_volume }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$VALIDATE_ONLY" == "true" ]]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "init_volume=$INIT_VOLUME" >> "$GITHUB_OUTPUT"
+            echo "Release metadata verified. Validate-only mode will not contact or enqueue on a NAS runner."
+            exit 0
+          fi
+          [[ "$NAS_READY" == "true" ]] || { echo "NAS deployment is disabled; set the repository variable NAS_DEPLOY_READY=true after configuring a runner." >&2; exit 1; }
+          [[ "$RUNNER_LABEL" =~ ^[A-Za-z0-9_.-]{1,80}$ ]] || { echo "NAS_RUNNER_LABEL is missing or invalid." >&2; exit 1; }
+          [[ "$ENV_FILE" == /* ]] || { echo "TEAMSHELF_ENV_FILE must be an absolute path on the NAS runner." >&2; exit 1; }
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "init_volume=$INIT_VOLUME" >> "$GITHUB_OUTPUT"
+          echo "runner_label=$RUNNER_LABEL" >> "$GITHUB_OUTPUT"
+          echo "env_file=$ENV_FILE" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to configured NAS
+    needs: preflight
+    if: needs.preflight.outputs.deploy == 'true'
+    runs-on: [self-hosted, linux, "${{ needs.preflight.outputs.runner_label }}"]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout release script from the verified source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          persist-credentials: false
+      - name: Authenticate and deploy the verified immutable digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+          TEAMSHELF_ENV_FILE: ${{ needs.preflight.outputs.env_file }}
+          TEAMSHELF_IMAGE_REF: ${{ needs.preflight.outputs.image_ref }}
+          INIT_VOLUME: ${{ needs.preflight.outputs.init_volume }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker_config="$(mktemp -d)"
+          chmod 0700 "$docker_config"
+          export DOCKER_CONFIG="$docker_config"
+          trap 'docker --config "$DOCKER_CONFIG" logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GH_TOKEN" | docker --config "$DOCKER_CONFIG" login ghcr.io --username "$GH_ACTOR" --password-stdin
+          args=()
+          if [[ "$INIT_VOLUME" == "true" ]]; then args+=(--init-volume); fi
+          bash deploy/release.sh "${args[@]}"

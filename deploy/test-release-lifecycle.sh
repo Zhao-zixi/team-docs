@@ -16,9 +16,11 @@ MOCK
 cat >"$TMP/bin/jq" <<'MOCK'
 #!/usr/bin/env sh
 case "$*" in
-  *'.name // empty'*) printf '%s\n' "$TEAMSHELF_COMPOSE_PROJECT" ;;
   *'.services.teamshelf.image // empty'*) printf '%s\n' "$TEAMSHELF_IMAGE_REF" ;;
-  *'.services.teamshelf.volumes'*) printf '%s\n' "$TEAMSHELF_DATA_VOLUME" ;;
+  *'.services.teamshelf.volumes'*) printf 'teamshelf-data\n' ;;
+  *'.volumes["teamshelf-data"].name // empty'*) printf '%s\n' "$TEAMSHELF_DATA_VOLUME" ;;
+  *'.volumes["teamshelf-data"].external // false'*) printf 'true\n' ;;
+  *'.name // empty'*) printf '%s\n' "$TEAMSHELF_COMPOSE_PROJECT" ;;
   *) exit 2 ;;
 esac
 MOCK

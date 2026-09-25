@@ -3,19 +3,36 @@ set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
-trap 'rm -rf -- "$TMP"' EXIT
+BACKUP_DIR="$HOME/.teamshelf-preflight-$$"
+trap 'rm -rf -- "$TMP" "$BACKUP_DIR"' EXIT
 mkdir -p "$TMP/bin" "$TMP/backup"
 
 cat >"$TMP/bin/flock" <<'MOCK'
 #!/usr/bin/env sh
 exit 0
 MOCK
+cat >"$TMP/bin/realpath" <<'MOCK'
+#!/usr/bin/env bash
+args="$*"
+path="${!#}"
+case "$path" in
+  */backup-link)
+    if [[ " $args " == *" -s "* ]]; then printf '%s\n' "$path"; else printf '%s\n' "${path%/backup-link}/real-backup"; fi
+    ;;
+  */backup-link/sub)
+    if [[ " $args " == *" -s "* ]]; then printf '%s\n' "$path"; else printf '%s\n' "${path%/backup-link/sub}/real-backup/sub"; fi
+    ;;
+  *) exec /usr/bin/realpath "$@" ;;
+esac
+MOCK
 cat >"$TMP/bin/jq" <<'MOCK'
 #!/usr/bin/env sh
 case "$*" in
-  *'.name // empty'*) printf '%s\n' "$TEAMSHELF_COMPOSE_PROJECT" ;;
   *'.services.teamshelf.image // empty'*) printf '%s\n' "$TEAMSHELF_IMAGE_REF" ;;
-  *'.services.teamshelf.volumes'*) printf '%s\n' "$TEAMSHELF_DATA_VOLUME" ;;
+  *'.services.teamshelf.volumes'*) printf 'teamshelf-data\n' ;;
+  *'.volumes["teamshelf-data"].name // empty'*) printf '%s\n' "$TEAMSHELF_DATA_VOLUME" ;;
+  *'.volumes["teamshelf-data"].external // false'*) printf 'true\n' ;;
+  *'.name // empty'*) printf '%s\n' "$TEAMSHELF_COMPOSE_PROJECT" ;;
   *) exit 2 ;;
 esac
 MOCK
@@ -54,7 +71,7 @@ cat >"$TMP/.env" <<ENV
 TEAMSHELF_COMPOSE_PROJECT=teamshelf-existing
 TEAMSHELF_DATA_VOLUME=teamshelf-existing_teamshelf-data
 TEAMSHELF_IMAGE_REF=ghcr.io/zhao-zixi/team-docs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-TEAMSHELF_BACKUP_DIR=/var/backups/teamshelf
+TEAMSHELF_BACKUP_DIR=$BACKUP_DIR
 APP_ORIGIN=http://localhost:8080
 SETUP_TOKEN=test-only-secret-value
 ENV
@@ -64,7 +81,7 @@ export DOCKER_BIN="$TMP/bin/docker-mock"
 export TEAMSHELF_ENV_FILE="$TMP/.env"
 export TEAMSHELF_COMPOSE_PROJECT=teamshelf-existing
 export TEAMSHELF_DATA_VOLUME=teamshelf-existing_teamshelf-data
-export TEAMSHELF_BACKUP_DIR=/var/backups/teamshelf
+export TEAMSHELF_BACKUP_DIR="$BACKUP_DIR"
 export MOCK_DOCKER_LOG="$TMP/docker.log"
 
 # Workflow input must be rejected before invoking Docker, and no secret may echo.
@@ -77,6 +94,41 @@ grep -q 'sha256:' "$TMP/invalid.out"
 ! grep -q 'test-only-secret-value' "$TMP/invalid.out"
 [[ ! -s "$MOCK_DOCKER_LOG" ]]
 
+# The shared volume lock rejects active directories and symlink redirection before Docker calls.
+export TEAMSHELF_IMAGE_REF=ghcr.io/zhao-zixi/team-docs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+mkdir -p "$BACKUP_DIR"
+LOCK_DIR="$BACKUP_DIR/.teamshelf-release-volume-$TEAMSHELF_DATA_VOLUME.lock"
+printf 'leave-this-file-alone' >"$TMP/lock-target"
+if ln -s "$TMP/lock-target" "$LOCK_DIR" 2>/dev/null; then
+  : >"$MOCK_DOCKER_LOG"
+  if bash "$ROOT/deploy/release.sh" >"$TMP/lock-link.out" 2>&1; then printf 'expected symlink lock rejection\n' >&2; exit 1; fi
+  grep -q 'another deployment is running or a stale lock exists' "$TMP/lock-link.out"
+  [[ -L "$LOCK_DIR" ]] && [[ "$(cat "$TMP/lock-target")" == leave-this-file-alone ]]
+  [[ ! -s "$MOCK_DOCKER_LOG" ]]
+  rm -- "$LOCK_DIR"
+else
+  mkdir -m 700 "$LOCK_DIR"
+  : >"$MOCK_DOCKER_LOG"
+  if bash "$ROOT/deploy/release.sh" >"$TMP/lock-exists.out" 2>&1; then printf 'expected active lock rejection\n' >&2; exit 1; fi
+  grep -q 'another deployment is running or a stale lock exists' "$TMP/lock-exists.out"
+  [[ ! -s "$MOCK_DOCKER_LOG" ]]
+  rmdir "$LOCK_DIR"
+fi
+
+# Backup directory symlinks are rejected both at the final component and in parents.
+mkdir -p "$TMP/real-backup/sub"
+ln -s "$TMP/real-backup" "$TMP/backup-link"
+for path in "$TMP/backup-link" "$TMP/backup-link/sub"; do
+  export TEAMSHELF_BACKUP_DIR="$path"
+  : >"$MOCK_DOCKER_LOG"
+  if bash "$ROOT/deploy/release.sh" >"$TMP/backup-symlink.out" 2>&1; then
+    printf 'expected backup path symlink to be rejected: %s\n' "$path" >&2
+    exit 1
+  fi
+  grep -q 'backup directory path must not contain symbolic links' "$TMP/backup-symlink.out"
+  [[ ! -s "$MOCK_DOCKER_LOG" ]]
+done
+export TEAMSHELF_BACKUP_DIR="$BACKUP_DIR"
 # A missing external volume must fail before pull, stop, or any service mutation.
 export TEAMSHELF_IMAGE_REF=ghcr.io/zhao-zixi/team-docs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 : >"$MOCK_DOCKER_LOG"

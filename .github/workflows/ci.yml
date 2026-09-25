@@ -159,7 +159,7 @@ jobs:
           env_file="${SMOKE_ROOT}/release.env"
           state_file="${SMOKE_ROOT}/smoke-state.json"
           mkdir -p "$backup_dir"
-          chmod 0777 "$backup_dir"
+          chmod 1777 "$backup_dir"
           setup_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           umask 077
           cat > "$env_file" <<EOF

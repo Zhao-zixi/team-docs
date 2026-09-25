@@ -27,7 +27,7 @@ case "${1:-}" in
   *) usage >&2; fail "unknown argument" ;;
 esac
 
-for command in bash awk realpath date; do
+for command in bash awk realpath stat date jq; do
   command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 command -v "$DOCKER_BIN" >/dev/null 2>&1 || fail "Docker CLI not found"
@@ -59,27 +59,37 @@ BACKUP_DIR="$(setting TEAMSHELF_BACKUP_DIR)" || fail "provide TEAMSHELF_BACKUP_D
 [[ "$VOLUME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail "invalid Docker volume name"
 [[ "$IMAGE_REF" =~ ^ghcr\.io/zhao-zixi/team-docs@sha256:[a-f0-9]{64}$ ]] || fail "TEAMSHELF_IMAGE_REF must be ghcr.io/zhao-zixi/team-docs@sha256:<64 lowercase hex characters>"
 [[ "$BACKUP_DIR" == /* ]] || fail "TEAMSHELF_BACKUP_DIR must be an absolute persistent NAS host path"
+BACKUP_DIR_LEXICAL="$(realpath -m -s -- "$BACKUP_DIR")" || fail "could not normalize backup directory path"
+BACKUP_DIR_RESOLVED="$(realpath -m -- "$BACKUP_DIR")" || fail "could not resolve backup directory path"
+[[ "$BACKUP_DIR_LEXICAL" == "$BACKUP_DIR_RESOLVED" ]] || fail "backup directory path must not contain symbolic links"
+BACKUP_DIR="$BACKUP_DIR_RESOLVED"
 case "$BACKUP_DIR" in
   /tmp|/tmp/*|/var/tmp|/var/tmp/*) fail "backup directory must be persistent, not a temporary path" ;;
 esac
-BACKUP_DIR="$(realpath -m -- "$BACKUP_DIR")"
 case "$BACKUP_DIR" in
   "$ROOT"|"$ROOT"/*) fail "backup directory must be outside the repository/container checkout" ;;
 esac
 
-# One host-level lock serializes deploys. Never remove a stale lock automatically.
-LOCK_FILE="${TMPDIR:-/tmp}/teamshelf-release-$PROJECT.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || fail "another TeamShelf release is running (or lock is held); inspect $LOCK_FILE before retrying"
-
+mkdir -p -- "$BACKUP_DIR"
+[[ -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]] || fail "backup path must be a real persistent directory"
+BACKUP_MODE="$(stat -c %a -- "$BACKUP_DIR")" || fail "could not inspect backup directory permissions"
+(( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail "backup directory must not be group/world writable unless sticky-bit protected"
+# Atomic shared lock directory serializes separate checkouts using this deployment backup path.
+LOCK_DIR="$BACKUP_DIR/.teamshelf-release-volume-$VOLUME.lock"
+mkdir -m 700 -- "$LOCK_DIR" 2>/dev/null || fail "another deployment is running or a stale lock exists; inspect $LOCK_DIR and remove it only after verifying no deploy is active"
+trap 'rmdir -- "$LOCK_DIR" 2>/dev/null || true' EXIT
 COMPOSE=("$DOCKER_BIN" compose --env-file "$ENV_FILE" -p "$PROJECT" -f "$COMPOSE_FILE")
 "${COMPOSE[@]}" config --quiet >/dev/null || fail "Docker Compose release configuration is invalid; old service was not stopped"
 CONFIG_JSON="$("${COMPOSE[@]}" config --format json 2>/dev/null)" || fail "could not resolve release Compose configuration"
 CONFIG_PROJECT="$(jq -r '.name // empty' <<<"$CONFIG_JSON")"
 CONFIG_IMAGE="$(jq -r '.services.teamshelf.image // empty' <<<"$CONFIG_JSON")"
-CONFIG_VOLUME="$(jq -r '[.services.teamshelf.volumes[]? | select(.target == "/app/data" and .type == "volume")][0].source // empty' <<<"$CONFIG_JSON")"
-[[ "$CONFIG_PROJECT" == "$PROJECT" && "$CONFIG_IMAGE" == "$IMAGE_REF" && "$CONFIG_VOLUME" == "$VOLUME" ]] || fail "resolved Compose project/image/data volume differs from explicit .env values"
-unset CONFIG_JSON
+CONFIG_VOLUME_SOURCE="$(jq -r '[.services.teamshelf.volumes[]? | select(.target == "/app/data" and .type == "volume")][0].source // empty' <<<"$CONFIG_JSON")"
+CONFIG_VOLUME_NAME="$(jq -r '.volumes["teamshelf-data"].name // empty' <<<"$CONFIG_JSON")"
+CONFIG_VOLUME_EXTERNAL="$(jq -r '.volumes["teamshelf-data"].external // false' <<<"$CONFIG_JSON")"
+if [[ "$CONFIG_PROJECT" != "$PROJECT" || "$CONFIG_IMAGE" != "$IMAGE_REF" || "$CONFIG_VOLUME_SOURCE" != teamshelf-data || "$CONFIG_VOLUME_NAME" != "$VOLUME" || "$CONFIG_VOLUME_EXTERNAL" != true ]]; then
+  fail "resolved Compose mismatch: project expected=$PROJECT actual=$CONFIG_PROJECT; image expected=$IMAGE_REF actual=$CONFIG_IMAGE; source expected=teamshelf-data actual=$CONFIG_VOLUME_SOURCE; external volume expected=$VOLUME actual=$CONFIG_VOLUME_NAME external=$CONFIG_VOLUME_EXTERNAL"
+fi
+unset CONFIG_JSON CONFIG_VOLUME_SOURCE CONFIG_VOLUME_NAME CONFIG_VOLUME_EXTERNAL
 
 ALL_CONTAINER_IDS="$("$DOCKER_BIN" ps -aq --filter 'label=com.docker.compose.service=teamshelf')" || fail "could not enumerate TeamShelf containers; refusing deployment"
 mapfile -t ALL_TEAMSHELF_CONTAINERS <<< "$ALL_CONTAINER_IDS"
@@ -122,8 +132,6 @@ if (( VOLUME_EXISTS )); then
   done
 fi
 
-mkdir -p -- "$BACKUP_DIR"
-[[ -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]] || fail "backup path must be a real persistent directory"
 
 # Pull while the old instance is still serving.
 "$DOCKER_BIN" pull "$IMAGE_REF" >/dev/null || fail "image pull failed; current service was not stopped"
