@@ -12,21 +12,23 @@ npm run configure
 npm run dev
 ```
 
-`npm run configure` 创建项目根目录 `.env`，默认 origin 为 `http://localhost:8080`、端口为 `8080`。开发脚本会把本地 Vite origin/服务端口设为 `http://localhost:5173` 和 `3000`，并从 `.env` 读取初始化 token 和数据目录。首次打开时按页面提示使用一次性 setup token 完成初始化；token 存在 `.env`，在本机读取后输入即可。已存在 `.env` 时命令拒绝覆盖；确定要重新生成时运行 `npm run configure -- --force`。
+`npm run configure` 创建项目根目录 `.env`，默认 origin 为 `http://localhost:8080`、端口为 `8080`。本机开发请开两个 PowerShell 窗口：`npm run dev` 启动 API，`npm run dev:client` 启动 Vite；API 脚本从 `.env` 读取初始化 token 和数据目录，并覆盖本机开发 origin/端口为 `http://localhost:5173` 和 `3000`。Vite 前端支持热更新；修改后端代码时在 API 窗口按 `Ctrl+C` 停止并重新运行 `npm run dev`，避免后端热重启与单实例数据库锁发生竞争。首次打开时按页面提示使用一次性 setup token 完成初始化；token 存在 `.env`，在本机读取后输入即可。已存在 `.env` 时命令拒绝覆盖；确定要重新生成时运行 `npm run configure -- --force`。
 
 部署到 NAS 前，将 `APP_ORIGIN` 改成用户实际访问的完整 origin，包括协议、域名或 IP 和端口，例如 `http://192.168.1.20:8080`。origin 必须与浏览器地址精确一致。`DATA_DIR` 默认 `./data`，开发数据在项目目录下。
 
-NAS 没有 Node.js 时，不需要在 NAS 安装 Node。可以在有 Node 24 的管理电脑上运行 configure，然后把项目和 `.env` 放到 NAS 的部署目录；或者用 Docker 生成 token：
+NAS 没有宿主 Node.js 时，可在管理电脑运行 `npm run configure` 后将项目和 `.env` 一起复制到 NAS；也可直接在 NAS 的项目目录用 Docker 容器运行配置脚本，不会在命令行打印 token：
 
 ```sh
-docker run --rm node:24-bookworm-slim node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+docker run --rm -v "$PWD:/work" -w /work \
+  -e APP_ORIGIN=http://192.168.1.20:8080 -e PORT=8080 \
+  -e COOKIE_SECURE=false -e DATA_DIR=/app/data \
+  node:24-bookworm-slim node scripts/configure.mjs
 ```
 
-将输出值粘贴到 NAS 部署目录 `.env` 的 `SETUP_TOKEN=` 后面。不要将 token 放进命令历史、截图或共享日志。
-
+该命令会通过目录挂载在项目根目录创建 `.env`，其中包含随机的一次性 `SETUP_TOKEN`。首次初始化时在本机私下读取该值并输入网页；不要把它放进命令历史、截图或共享日志。不要提交 `.env`。
 ## Docker Compose 部署
 
-安装并启用 NAS 厂商提供的 Docker/Container Manager。项目目录内复制 `.env.example` 为 `.env`，生成强随机 `SETUP_TOKEN`，并设置 NAS 上浏览器访问的精确 `APP_ORIGIN`。HTTP 局域网示例：
+安装并启用 NAS 厂商提供的 Docker/Container Manager。按上一节通过 Node 24 管理电脑或 Docker 临时容器创建 `.env`，并确认 `APP_ORIGIN` 与浏览器访问地址精确一致。HTTP 局域网示例：
 
 ```dotenv
 PORT=8080
@@ -35,7 +37,7 @@ COOKIE_SECURE=false
 SETUP_TOKEN=<随机生成的值>
 ```
 
-在项目目录运行：
+核对 `.env` 的 `PORT`、`APP_ORIGIN`、`COOKIE_SECURE` 后，在项目目录运行：
 
 ```sh
 docker compose build

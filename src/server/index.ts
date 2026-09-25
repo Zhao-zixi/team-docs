@@ -20,14 +20,27 @@ async function main(): Promise<void> {
   }
 
   let closing = false;
+  const shutdownKeepAlive = setInterval(() => {}, 1_000);
+  shutdownKeepAlive.unref();
   const close = async () => {
     if (closing) return;
     closing = true;
-    await app.close();
-    await releaseLock();
+    shutdownKeepAlive.ref();
+    try {
+      await app.close();
+      await releaseLock();
+    } finally {
+      clearInterval(shutdownKeepAlive);
+    }
   };
-  process.once('SIGINT', () => { void close(); });
-  process.once('SIGTERM', () => { void close(); });
+  const handleSignal = () => {
+    void close().catch((error: unknown) => {
+      console.error(`TeamShelf shutdown failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+      process.exitCode = 1;
+    });
+  };
+  process.once('SIGINT', handleSignal);
+  process.once('SIGTERM', handleSignal);
   console.info(`TeamShelf listening on port ${config.port}`);
 }
 
