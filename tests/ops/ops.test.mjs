@@ -29,7 +29,7 @@ test('backup and restore preserve data and rollback; refuse overwrite and active
   try {
     await mkdir(dataDir, { recursive: true });
     const live = new DatabaseSync(livePath);
-    try { live.exec(`CREATE TABLE notes (value TEXT NOT NULL); INSERT INTO notes VALUES ('before backup'); CREATE TABLE sessions (token_hash TEXT); INSERT INTO sessions VALUES ('session-secret'); CREATE TABLE invitations (token_hash TEXT, used_at INTEGER); INSERT INTO invitations VALUES ('pending', NULL), ('used', 100);`); }
+    try { live.exec(`CREATE TABLE notes (value TEXT NOT NULL); INSERT INTO notes VALUES ('before backup'); CREATE TABLE sessions (token_hash TEXT); INSERT INTO sessions VALUES ('session-secret'); CREATE TABLE invitations (token_hash TEXT, used_at INTEGER); INSERT INTO invitations VALUES ('pending', NULL), ('used', 100); CREATE TABLE agent_tokens (id TEXT, revoked_at TEXT); INSERT INTO agent_tokens VALUES ('pat-active', NULL), ('pat-revoked', 'old-revocation');`); }
     finally { live.close(); }
 
     const backupResult = run('backup.mjs', [backupPath], root, { DATA_DIR: dataDir });
@@ -70,6 +70,8 @@ test('backup and restore preserve data and rollback; refuse overwrite and active
       assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM sessions').get().count, 0);
       assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM invitations WHERE used_at IS NULL').get().count, 0);
       assert.equal(restored.prepare('SELECT used_at FROM invitations WHERE token_hash = ?').get('used').used_at, 100);
+      assert.ok(restored.prepare('SELECT revoked_at FROM agent_tokens WHERE id = ?').get('pat-active').revoked_at);
+      assert.equal(restored.prepare('SELECT revoked_at FROM agent_tokens WHERE id = ?').get('pat-revoked').revoked_at, 'old-revocation');
     } finally { restored.close(); }
     const rollbackName = (await readdir(dataDir)).find((name) => name.startsWith('teamshelf.sqlite.rollback-'));
     assert.ok(rollbackName, 'old database rollback copy exists');
@@ -81,6 +83,31 @@ test('backup and restore preserve data and rollback; refuse overwrite and active
   }
 });
 
+test('restore accepts a legacy v1 backup without agent_tokens', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-v1-restore-'));
+  const dataDir = path.join(root, 'data');
+  const backupPath = path.join(root, 'legacy-v1.sqlite');
+  const livePath = path.join(dataDir, 'teamshelf.sqlite');
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const legacy = new DatabaseSync(backupPath);
+    try { legacy.exec("CREATE TABLE notes (value TEXT NOT NULL); INSERT INTO notes VALUES ('legacy snapshot'); PRAGMA user_version=1;"); }
+    finally { legacy.close(); }
+    const live = new DatabaseSync(livePath);
+    try { live.exec("CREATE TABLE notes (value TEXT NOT NULL); INSERT INTO notes VALUES ('current data');"); }
+    finally { live.close(); }
+    const restored = run('restore.mjs', [backupPath, '--confirm'], root, { DATA_DIR: dataDir });
+    assert.equal(restored.status, 0, restored.stderr);
+    const reopened = new DatabaseSync(livePath, { readOnly: true });
+    try {
+      assert.deepEqual(rows(reopened, 'SELECT value FROM notes'), [{ value: 'legacy snapshot' }]);
+      assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, 1);
+      assert.equal(reopened.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='agent_tokens'").get().count, 0);
+    } finally { reopened.close(); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test('configure creates a random secret without displaying it and refuses overwrite unless forced', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-config-'));
   try {

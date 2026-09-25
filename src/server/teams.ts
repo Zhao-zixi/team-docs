@@ -8,6 +8,7 @@ import { requireUserId, createSession, setSessionCookie } from './auth.js';
 import { conflict, forbidden, notFound, unauthorized } from './errors.js';
 import { expiresInDays, hashPassword, hashToken, isoNow, newToken, verifyPassword } from './security.js';
 import { validateBody, validateParams } from './validation.js';
+import { hasExplicitPage, paginate, parsePage } from './pagination.js';
 
 type Role = 'owner' | 'admin' | 'editor' | 'viewer';
 type InvitationRole = Exclude<Role, 'owner'>;
@@ -130,11 +131,15 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     const userId = requireUserId(db, request);
     const { teamId } = request.params as z.infer<typeof IdParams>;
     requireTeamMember(db, teamId, userId);
+    const page = parsePage(request.query);
     const members = db.prepare(`SELECT u.id user_id,u.email,u.name,m.role
       FROM members m JOIN users u ON u.id=m.user_id WHERE m.team_id=?
       ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,u.name`)
       .all(teamId) as unknown as TeamMemberRow[];
-    return { members: members.map(memberDto) };
+    const entries = members.map(memberDto);
+    if (!request.agentPrincipal && !hasExplicitPage(request.query)) return { members: entries };
+    const pageResult = paginate(entries, page);
+    return { members: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.patch('/teams/:teamId/members/:userId', {
@@ -192,10 +197,14 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     const userId = requireUserId(db, request);
     const { teamId } = request.params as z.infer<typeof IdParams>;
     requireManager(db, teamId, userId);
+    const page = parsePage(request.query);
     const invitations = db.prepare(`SELECT id,email,role,created_at,expires_at FROM invitations
       WHERE team_id=? AND used_at IS NULL AND expires_at>? ORDER BY created_at DESC`).all(teamId, isoNow()) as
       Array<{ id: string; email: string; role: InvitationRole; created_at: string; expires_at: string }>;
-    return { invitations: invitations.map((entry) => ({ id: entry.id, email: entry.email, role: entry.role, createdAt: entry.created_at, expiresAt: entry.expires_at })) };
+    const entries = invitations.map((entry) => ({ id: entry.id, email: entry.email, role: entry.role, createdAt: entry.created_at, expiresAt: entry.expires_at }));
+    if (!request.agentPrincipal && !hasExplicitPage(request.query)) return { invitations: entries };
+    const pageResult = paginate(entries, page);
+    return { invitations: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.post('/teams/:teamId/invitations', {

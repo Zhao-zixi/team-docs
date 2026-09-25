@@ -8,11 +8,12 @@ import type { AppContext } from './context.js';
 import { transaction } from './db.js';
 import { badRequest, conflict, forbidden, notFound } from './errors.js';
 import { isoNow } from './security.js';
+import { hasExplicitPage, paginate, parsePage } from './pagination.js';
 import { validateBody } from './validation.js';
 
 const IdSchema = z.string().uuid();
 const TitleSchema = z.string().min(1).max(200).refine((value) => value.trim().length > 0).refine((value) => !/[\u0000-\u001f\u007f]/.test(value));
-const SearchQuerySchema = z.object({ q: z.string().trim().min(1).max(100) }).strict();
+const SearchQuerySchema = z.object({ q: z.string().trim().min(1).max(100), spaceId: IdSchema.optional(), offset: z.coerce.number().int().min(0).max(10000000).default(0), limit: z.coerce.number().int().min(1).max(100).default(100) }).strict();
 const GrantSchema = z.object({ userId: IdSchema, role: z.enum(['viewer', 'editor']) }).strict();
 const GrantsSchema = z.array(GrantSchema).max(500).superRefine((grants, context) => {
   const users = new Set<string>();
@@ -165,12 +166,14 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const { teamId } = request.params as Params;
     const user = actor(db, request);
     requireTeamRole(db, user.id, teamId!);
+    const page = parsePage(request.query);
     const rows = db.prepare('SELECT id,team_id,name,description,visibility FROM spaces WHERE team_id=? ORDER BY name,id').all(teamId) as unknown as SpaceRow[];
     const spaces = rows.filter((row) => !request.agentPrincipal?.spaceId || row.id === request.agentPrincipal.spaceId).flatMap((row) => {
       const access = getSpaceAccess(db, user.id, row.id);
       return access?.canRead ? [toSpace(row, access)] : [];
     });
-    return { spaces: spaces.slice(0, 100) };
+    const pageResult = paginate(spaces, page);
+    return { spaces: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.post('/teams/:teamId/spaces', { config: { agentAccess: { scope: 'manage', operation: 'team.manage', teamParam: 'teamId' } }, preValidation: [validateParams(TeamParamsSchema), validateBody(CreateSpaceSchema)] }, async (request, reply) => {
@@ -252,13 +255,15 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const { spaceId } = request.params as Params;
     const user = actor(db, request);
     visibleSpace(db, user.id, spaceId!);
+    const page = parsePage(request.query);
     const candidates = db.prepare(`SELECT d.id,d.space_id,d.title,d.body,d.visibility,d.version,d.created_by,d.created_at,d.updated_by,d.updated_at,u.name AS updated_by_name
       FROM documents d JOIN users u ON u.id=d.updated_by WHERE d.space_id=? ORDER BY d.updated_at DESC,d.id`).all(spaceId) as unknown as DocumentRow[];
     const documents = candidates.flatMap((row) => {
       const access = getDocumentAccess(db, user.id, row.id);
       return access?.canRead ? [toSummary(row, access)] : [];
     });
-    return { documents: documents.slice(0, 100) };
+    const pageResult = paginate(documents, page);
+    return { documents: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.post('/spaces/:spaceId/documents', { config: { agentAccess: { scope: 'write', operation: 'document.write', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: [validateParams(SpaceParamsSchema), validateBody(CreateDocumentSchema)] }, async (request, reply) => {
@@ -360,9 +365,12 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const { id } = request.params as Params;
     const user = actor(db, request);
     visibleDocument(db, user.id, id!);
+    const page = parsePage(request.query);
     const revisions = db.prepare(`SELECT r.id,r.version,r.title,r.body,r.created_at AS createdAt,r.author_name AS authorName
       FROM revisions r WHERE r.document_id=? ORDER BY r.version DESC`).all(id) as unknown as Revision[];
-    return { revisions };
+    if (!request.agentPrincipal && !hasExplicitPage(request.query)) return { revisions };
+    const pageResult = paginate(revisions, page);
+    return { revisions: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.post('/documents/:id/revisions/:revisionId/restore', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: [validateParams(RevisionParamsSchema), validateBody(RestoreSchema)] }, async (request) => {
@@ -409,16 +417,25 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const parsedQuery = SearchQuerySchema.safeParse(request.query);
     if (!parsedQuery.success) throw badRequest('搜索词长度必须为 1 到 100 个字符，且不能包含额外字段。');
     const needle = parsedQuery.data.q.toLocaleLowerCase();
+    const page = { offset: parsedQuery.data.offset, limit: parsedQuery.data.limit };
+    const selectedSpaceId = parsedQuery.data.spaceId ?? request.agentPrincipal?.spaceId ?? undefined;
+    if (parsedQuery.data.spaceId && request.agentPrincipal?.spaceId && parsedQuery.data.spaceId !== request.agentPrincipal.spaceId) throw notFound();
+    if (selectedSpaceId) {
+      const selectedSpace = db.prepare('SELECT team_id FROM spaces WHERE id=?').get(selectedSpaceId) as { team_id: string } | undefined;
+      if (!selectedSpace || selectedSpace.team_id !== teamId) throw notFound();
+      visibleSpace(db, user.id, selectedSpaceId);
+    }
     const ids = listVisibleDocumentIds(db, user.id, teamId!);
     const matches: DocumentSummary[] = [];
     for (const id of ids) {
       const access = getDocumentAccess(db, user.id, id);
-      if (!access?.canRead || (request.agentPrincipal?.spaceId && access.spaceId !== request.agentPrincipal.spaceId)) continue;
+      if (!access?.canRead || (selectedSpaceId && access.spaceId !== selectedSpaceId)) continue;
       const row = getDocument(db, id);
       if (!row) continue;
       if (`${row.title}\n${row.body}`.toLocaleLowerCase().includes(needle)) matches.push(toSummary(row, access));
     }
-    return { documents: matches.slice(0, 100) };
+    const pageResult = paginate(matches, page);
+    return { documents: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 
   app.get('/teams/:teamId/audit', { config: { agentAccess: { scope: 'manage', operation: 'audit.read', teamParam: 'teamId' } }, preValidation: validateParams(TeamParamsSchema) }, async (request) => {
@@ -426,8 +443,9 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const user = actor(db, request);
     const role = requireTeamRole(db, user.id, teamId!);
     if (!isManager(role)) throw forbidden();
+    const page = parsePage(request.query);
     const rows = db.prepare(`SELECT e.id,e.actor_id,e.action,e.target_type,e.target_id,e.created_at,e.details_json,u.name AS actor_name
-      FROM audit_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.team_id=? ORDER BY e.created_at DESC,e.id DESC LIMIT 100`)
+      FROM audit_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.team_id=? ORDER BY e.created_at DESC,e.id DESC`)
       .all(teamId) as Array<{ id: string; actor_id: string | null; actor_name: string | null; action: string; target_type: string; target_id: string | null; created_at: string; details_json: string }>;
     const events = rows.map((row) => {
       let details: unknown = {};
@@ -435,6 +453,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
       return { id: row.id, actorId: row.actor_id, actorName: row.actor_name, action: row.action,
         targetType: row.target_type, targetId: row.target_id, createdAt: row.created_at, details };
     });
-    return { events };
+    const pageResult = paginate(events, page);
+    return { events: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
   });
 }

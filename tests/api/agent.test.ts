@@ -14,7 +14,7 @@ const csrf = { 'x-requested-with': 'TeamShelf', origin };
 let dir: string;
 let db: Db;
 let app: ReturnType<typeof createApp>;
-let ids: { owner: string; admin: string; editor: string; viewer: string; team: string; otherTeam: string; space: string; otherSpace: string; doc: string; otherDoc: string; remoteDoc: string };
+let ids: { owner: string; admin: string; editor: string; viewer: string; team: string; otherTeam: string; space: string; otherSpace: string; remoteSpace: string; doc: string; otherDoc: string; remoteDoc: string };
 let sessions: Record<string, string>;
 
 function member(teamId: string, userId: string, role: string) {
@@ -65,7 +65,7 @@ beforeEach(async () => {
     db.prepare('INSERT INTO sessions(id,token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?,?)')
       .run(randomUUID(), hashToken(token), userId, now, new Date(Date.now() + 86_400_000).toISOString());
   }
-  ids = { owner, admin, editor, viewer, team, otherTeam, space, otherSpace, doc, otherDoc, remoteDoc };
+  ids = { owner, admin, editor, viewer, team, otherTeam, space, otherSpace, remoteSpace, doc, otherDoc, remoteDoc };
   const config: AppConfig = { port: 3000, dataDir: dir, appOrigin: origin, setupToken: 'unused', cookieSecure: false, isProduction: false };
   app = createApp({ db, config, logger: false, serveClient: false });
   await app.ready();
@@ -136,13 +136,14 @@ describe('Agent credentials and REST bearer policy', () => {
     const otherTeam = await bearer(teamToken.token, 'GET', `/api/teams/${ids.otherTeam}/spaces`);
     expect(otherTeam.statusCode).toBe(404);
     expect(otherTeam.body).not.toContain('Remote');
-    expect((await bearer(teamToken.token, 'GET', `/api/documents/${ids.remoteDoc}`)).statusCode).toBe(404);
+    expect((await bearer(teamToken.token, 'GET', `/api/documents/${ids.remoteSpace}`)).statusCode).toBe(404);
 
     const scoped = await issue('owner', { scope: 'read', spaceId: ids.space });
     const spaces = await bearer(scoped.token, 'GET', `/api/teams/${ids.team}/spaces`);
     expect(spaces.statusCode).toBe(200);
     expect(spaces.json().spaces.map((entry: { id: string }) => entry.id)).toEqual([ids.space]);
     const search = await bearer(scoped.token, 'GET', `/api/teams/${ids.team}/search?q=needle`);
+    expect((await bearer(scoped.token, 'GET', '/api/teams/' + ids.team + '/search?q=needle&spaceId=' + ids.otherSpace)).statusCode).toBe(404);
     expect(search.statusCode).toBe(200);
     expect(search.json().documents.map((entry: { id: string }) => entry.id)).toEqual([ids.doc]);
     expect((await bearer(scoped.token, 'GET', `/api/documents/${ids.otherDoc}`)).statusCode).toBe(404);
@@ -189,6 +190,11 @@ describe('Agent credentials and REST bearer policy', () => {
     const changed = await bearer(issued.token, 'PATCH', `/api/documents/${ids.doc}`, { title: 'Updated by PAT', body: 'written through the guarded REST route', version: 1 });
     expect(changed.statusCode).toBe(200);
     expect(changed.json().document.version).toBe(2);
+    const audit = db.prepare("SELECT actor_id,target_type,target_id,details_json FROM audit_events WHERE action='agent.document.write' ORDER BY created_at DESC LIMIT 1").get() as { actor_id: string; target_type: string; target_id: string; details_json: string };
+    expect(audit.actor_id).toBe(ids.editor);
+    expect(audit.target_type).toBe('document');
+    expect(audit.target_id).toBe(ids.doc);
+    expect(JSON.parse(audit.details_json)).toHaveProperty('credentialId', issued.credential.id);
     const stale = await bearer(issued.token, 'PATCH', `/api/documents/${ids.doc}`, { title: 'Stale', body: 'must not overwrite', version: 1 });
     expect(stale.statusCode).toBe(409);
     const row = db.prepare('SELECT title,version FROM documents WHERE id=?').get(ids.doc) as { title: string; version: number };
@@ -197,6 +203,46 @@ describe('Agent credentials and REST bearer policy', () => {
     expect(extraFields.statusCode).toBe(400);
   });
 
+  it('paginates filtered spaces, documents, and search results beyond the first 100', async () => {
+    for (let index = 0; index < 105; index++) seedSpace(ids.team, ids.owner, `Page space ${index.toString().padStart(3, '0')}`);
+    for (let index = 0; index < 105; index++) seedDocument(ids.space, ids.owner, `Page doc ${index.toString().padStart(3, '0')}`, 'pagination needle');
+    for (let index = 0; index < 105; index++) {
+      const userId = randomUUID();
+      db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)').run(userId, `page-${index}@example.test`, `page-${index}@example.test`, `Page ${index}`, 'unused', isoNow());
+      member(ids.team, userId, 'viewer');
+    }
+    for (let version = 2; version <= 106; version++) db.prepare('INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(), ids.doc, version, `Revision ${version}`, 'body', isoNow(), ids.owner, 'Owner');
+    const issued = await issue('owner', { scope: 'read' });
+    const spaces = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces?offset=100&limit=100`);
+    const cookieMembers = await sessionRequest('owner', 'GET', `/api/teams/${ids.team}/members`);
+    expect(cookieMembers.statusCode).toBe(200);
+    expect(cookieMembers.json().members).toHaveLength(109);
+    const manageToken = await issue('owner', { scope: 'manage' });
+    const pagedMembers = await bearer(manageToken.token, 'GET', '/api/teams/' + ids.team + '/members?offset=100&limit=100');
+    expect(pagedMembers.json().members).toHaveLength(9);
+    const cookieRevisions = await sessionRequest('owner', 'GET', `/api/documents/${ids.doc}/revisions`);
+    expect(cookieRevisions.statusCode).toBe(200);
+    expect(cookieRevisions.json().revisions).toHaveLength(106);
+    const patRevisions = await bearer(issued.token, 'GET', `/api/documents/${ids.doc}/revisions?offset=100&limit=100`);
+    expect(patRevisions.statusCode).toBe(200);
+    expect(patRevisions.json().revisions).toHaveLength(6);
+    expect(spaces.statusCode).toBe(200);
+    expect(spaces.json().spaces).toHaveLength(7);
+    expect(spaces.json().hasMore).toBe(false);
+    expect(spaces.json().nextOffset).toBeNull();
+    const documents = await bearer(issued.token, 'GET', `/api/spaces/${ids.space}/documents?offset=100&limit=100`);
+    expect(documents.statusCode).toBe(200);
+    expect(documents.json().documents).toHaveLength(6);
+    const search = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&offset=100&limit=100`);
+    expect(search.statusCode).toBe(200);
+    expect(search.json().documents.length).toBeGreaterThan(0);
+    const scopedSearch = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&spaceId=${ids.otherSpace}`);
+    expect(scopedSearch.statusCode).toBe(200);
+    expect(scopedSearch.json().documents.map((doc: { id: string }) => doc.id)).toContain(ids.otherDoc);
+    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&spaceId=${ids.remoteSpace}`)).statusCode).toBe(404);
+    expect(search.json().documents).toHaveLength(7);
+    expect(search.json().documents.every((doc: { spaceId: string }) => [ids.space, ids.otherSpace].includes(doc.spaceId))).toBe(true);
+  });
   it('prevents write PATs from assigning document ACLs through REST', async () => {
     const writeToken = await issue('editor', { scope: 'write', spaceId: ids.space });
     const before = (db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(ids.space) as { count: number }).count;
