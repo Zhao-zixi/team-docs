@@ -116,15 +116,3 @@ export function createTeamShelfMcpHandler(options: {
   };
   return createMcpHandler(makeServer, { responseMode: 'json' });
 }
-
-
-
-
-
-
-
-
-
-
-
-

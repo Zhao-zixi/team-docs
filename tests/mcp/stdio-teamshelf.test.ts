@@ -76,7 +76,3 @@ describe('production stdio bridge to TeamShelf HTTP MCP', () => {
     expect(stderr).not.toContain(secret);
   });
 });
-
-
-
-
