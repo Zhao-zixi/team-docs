@@ -34,6 +34,14 @@ jobs:
         run: npm run typecheck
       - name: Unit, API, and operations tests
         run: npm test
+      - name: Release script syntax and fail-closed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in deploy/release.sh deploy/test-release-preflight.sh deploy/test-release-lifecycle.sh; do bash -n "$script"; done
+          bash deploy/test-release-preflight.sh
+          bash deploy/test-release-lifecycle.sh backup-failure
+          bash deploy/test-release-lifecycle.sh health-failure
       - name: Install Chromium for Playwright
         run: npx playwright install --with-deps chromium
       - name: Production browser E2E
@@ -95,3 +103,127 @@ jobs:
           done
           test "${health:-}" = healthy || { docker logs "$name"; exit 1; }
           curl --fail --silent --show-error http://127.0.0.1:18080/api/health
+  publish-image:
+    name: Publish and verify immutable GHCR image
+    needs: docker-smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish unique multi-platform candidate
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/zhao-zixi/team-docs:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Zhao-zixi/team-docs
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: First install, same-digest redeploy, and backup smoke
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          SMOKE_ROOT: ${{ runner.temp }}/teamshelf-release-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          image_ref="ghcr.io/zhao-zixi/team-docs@$IMAGE_DIGEST"
+          project="teamshelfci${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
+          volume="${project}-data"
+          backup_dir="${SMOKE_ROOT}/backups"
+          env_file="${SMOKE_ROOT}/release.env"
+          state_file="${SMOKE_ROOT}/smoke-state.json"
+          mkdir -p "$backup_dir"
+          chmod 0777 "$backup_dir"
+          setup_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          umask 077
+          cat > "$env_file" <<EOF
+          TEAMSHELF_COMPOSE_PROJECT=$project
+          TEAMSHELF_DATA_VOLUME=$volume
+          TEAMSHELF_BACKUP_DIR=$backup_dir
+          TEAMSHELF_IMAGE_REF=$image_ref
+          APP_ORIGIN=http://127.0.0.1:18080
+          SETUP_TOKEN=$setup_token
+          PORT=18080
+          COOKIE_SECURE=false
+          EOF
+          chmod 0600 "$env_file"
+          export TEAMSHELF_ENV_FILE="$env_file"
+          export TEAMSHELF_COMPOSE_PROJECT="$project"
+          export TEAMSHELF_DATA_VOLUME="$volume"
+          export TEAMSHELF_BACKUP_DIR="$backup_dir"
+          export TEAMSHELF_IMAGE_REF="$image_ref"
+          export APP_ORIGIN=http://127.0.0.1:18080
+          export SETUP_TOKEN="$setup_token"
+          export RELEASE_SMOKE_STATE="$state_file"
+          cleanup() {
+            docker compose --env-file "$env_file" -p "$project" -f deploy/compose.release.yaml down --remove-orphans >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+            rm -rf "$SMOKE_ROOT"
+          }
+          trap cleanup EXIT
+          bash deploy/release.sh --init-volume
+          node .github/scripts/release-smoke.mjs initialize
+          bash deploy/release.sh
+          node .github/scripts/release-smoke.mjs verify
+          mapfile -t backups < <(find "$backup_dir" -maxdepth 1 -type f -name 'teamshelf-*.sqlite' -print)
+          (( ${#backups[@]} >= 1 ))
+          document_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).documentId)' "$state_file")"
+          [[ "$document_id" =~ ^[0-9a-f-]{36}$ ]]
+          backup_file="${backups[0]}"
+          docker run --rm --network none --user 1000:1000 \
+            --mount "type=bind,src=$backup_dir,dst=/backup,readonly" \
+            --env BACKUP_FILE="$(basename -- "$backup_file")" \
+            --env DOCUMENT_ID="$document_id" \
+            --entrypoint node "$image_ref" --input-type=module -e '
+              import { DatabaseSync } from "node:sqlite";
+              const db = new DatabaseSync(`/backup/${process.env.BACKUP_FILE}`, { readOnly: true });
+              try {
+                if (db.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok") throw new Error("integrity check failed");
+                const row = db.prepare("SELECT body, version FROM documents WHERE id = ?").get(process.env.DOCUMENT_ID);
+                if (row?.body !== "CI release persistence smoke body" || row.version !== 1) throw new Error("backup content mismatch");
+              } finally { db.close(); }
+              process.stdout.write("Release backup integrity and content verified in the image runtime.\\n");
+            '
+      - name: Create immutable release metadata after smoke passes
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          node -e 'const fs=require("node:fs"); fs.writeFileSync("release-metadata.json", JSON.stringify({sourceSha:process.env.SOURCE_SHA,imageRef:`ghcr.io/zhao-zixi/team-docs@${process.env.IMAGE_DIGEST}`},null,2)+"\n")'
+      - name: Upload release metadata for verified deployments
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-metadata
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
