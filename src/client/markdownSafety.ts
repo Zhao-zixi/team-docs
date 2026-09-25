@@ -32,7 +32,10 @@ export function semanticallyEquivalentMarkdown(source: string, result: string): 
 export function inspectEditorDocument(value: unknown): string | undefined {
   const visit = (node: any): string | undefined => {
     if (node.type === "hardBreak" || node.type === "image") return node.type;
-    if ((node.type === "tableCell" || node.type === "tableHeader") && (node.content?.length !== 1 || node.content[0]?.type !== "paragraph")) return "table cell content";
+    if (node.type === "tableCell" || node.type === "tableHeader") {
+      if (node.content?.length !== 1 || node.content[0]?.type !== "paragraph") return "table cell content";
+      if ((node.attrs?.colspan ?? 1) !== 1 || (node.attrs?.rowspan ?? 1) !== 1) return "merged table cell";
+    }
     for (const mark of node.marks ?? []) if (!["bold", "italic", "strike", "code", "link"].includes(mark.type)) return mark.type;
     for (const child of node.content ?? []) { const issue = visit(child); if (issue) return issue; }
     return undefined;

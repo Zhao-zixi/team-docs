@@ -26,7 +26,9 @@ export function MarkdownEditor({ value, onChange, disabled, onValidityChange }: 
     editable: !disabled,
     onUpdate: ({ editor, transaction }) => {
       if (!transaction.docChanged) return;
-      const result = checkedMarkdownExport(editor.getJSON(), () => editor.getMarkdown());
+      let result: ReturnType<typeof checkedMarkdownExport>;
+      try { const editorDocument = editor.getJSON(); result = checkedMarkdownExport(editorDocument, () => editor.getMarkdown()); }
+      catch { result = { ok: false, reason: "Editor export failed", structureInvalid: true }; }
       const isInvalid = !result.ok;
       setStructureInvalid(!result.ok && result.structureInvalid); setInvalid(isInvalid); onValidityRef.current?.(isInvalid);
       if (!result.ok) { setWarning(result.structureInvalid ? `此编辑内容无法安全导出为 Markdown（${result.reason}）。内容仍保留在编辑器中，请修复后再保存，或下载编辑器草稿。` : "Markdown 正文超过 500KB。请缩短后再保存。"); return; }
@@ -40,8 +42,12 @@ export function MarkdownEditor({ value, onChange, disabled, onValidityChange }: 
     if (!check.ok) { setWarning(`此文档含有富文本暂不支持的 Markdown 语法（${check.reason}）。已保留原文，请使用源码模式编辑。`); return; }
     if (!editor) return;
     editor.commands.setContent(value, { contentType: "markdown", emitUpdate: false });
-    const reason = inspectEditorDocument(editor.getJSON());
-    const output = editor.getMarkdown();
+    let reason: string | undefined;
+    let output = "";
+    try {
+      const checked = checkedMarkdownExport(editor.getJSON(), () => editor.getMarkdown());
+      if (!checked.ok) reason = checked.reason; else output = checked.markdown;
+    } catch { reason = "editor export failed"; }
     if (reason || !semanticallyEquivalentMarkdown(value, output)) { setWarning(`富文本转换无法确认内容无损${reason ? `（${reason}）` : ""}。已保留原文，请继续使用源码模式编辑。`); return; }
     setInvalid(false); setStructureInvalid(false); onValidityRef.current?.(false); setWarning(""); setMode("rich");
   };

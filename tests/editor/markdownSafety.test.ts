@@ -47,6 +47,9 @@ describe("Tiptap editor document export constraints", () => {
   it("blocks multi-paragraph table cells that the Markdown exporter cannot represent", () => {
     expect(inspectEditorDocument(table([{ type: "paragraph", content: [{ type: "text", text: "一段" }] }, { type: "paragraph", content: [{ type: "text", text: "二段" }] }]))).toBe("table cell content");
   });
+  it("blocks merged cells whose span cannot be expressed in Markdown", () => {
+    expect(inspectEditorDocument({ type: "doc", content: [{ type: "table", content: [{ type: "tableRow", content: [{ type: "tableCell", attrs: { colspan: 2, rowspan: 1 }, content: [{ type: "paragraph" }] }] }] }] })).toBe("merged table cell");
+  });
   it("blocks hard breaks and unsupported marks", () => {
     expect(inspectEditorDocument({ type: "doc", content: [{ type: "paragraph", content: [{ type: "hardBreak" }] }] })).toBe("hardBreak");
     expect(inspectEditorDocument({ type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "下划线", marks: [{ type: "underline" }] }] }] })).toBe("underline");

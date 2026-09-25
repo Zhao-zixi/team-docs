@@ -16,7 +16,7 @@ export default defineConfig({
   reporter: [["list"]],
   use: { baseURL: "http://127.0.0.1:4187", trace: "retain-on-failure", screenshot: "only-on-failure", ...devices["Desktop Chrome"], viewport: { width: 1440, height: 1000 } },
   webServer: {
-    command: "npm run build && node --env-file-if-exists=.env dist/server/server/index.js",
+    command: "npm run build && npm start",
     url: "http://127.0.0.1:4187/api/health",
     reuseExistingServer: false,
     timeout: 120_000,
