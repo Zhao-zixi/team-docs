@@ -1,0 +1,155 @@
+import { expect, test } from "@playwright/test";
+
+const setupToken = "teamshelf-e2e-setup-token-2026-only-for-isolated-tests";
+const adminEmail = "owner-e2e@example.test";
+const adminPassword = "Teamshelf-Test-Password-2026!";
+const viewerPassword = "Viewer-Test-Password-2026!";
+
+test("real API flow: setup, edit, ACL, conflict recovery and deep-link refresh", async ({ page, browser }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "建立你的知屿" })).toBeVisible();
+  await page.getByLabel("初始化口令").fill(setupToken);
+  await page.getByLabel("团队名称").fill("E2E 知识团队");
+  await page.getByLabel("邮箱").fill(adminEmail);
+  await page.getByLabel("你的姓名").fill("E2E 管理员");
+  await page.getByLabel("密码").fill(adminPassword);
+  await page.getByRole("button", { name: "创建团队空间" }).click();
+  await expect(page.getByRole("heading", { name: "给团队知识，一个好去处。" })).toBeVisible();
+
+  await page.getByRole("button", { name: "团队成员" }).click();
+  const membersDialog = page.getByRole("dialog");
+  await membersDialog.getByLabel("受邀邮箱").fill("viewer-e2e@example.test");
+  await membersDialog.getByLabel("邀请角色").selectOption("viewer");
+  await membersDialog.getByRole("button", { name: "发送邀请" }).click();
+  const invitationLink = membersDialog.getByLabel("邀请链接，可选择复制");
+  await expect(invitationLink).toBeVisible();
+  const inviteUrl = await invitationLink.inputValue();
+  const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const viewerPage = await viewerContext.newPage();
+  await viewerPage.goto(inviteUrl);
+  await expect(viewerPage.getByRole("heading", { name: "接受团队邀请" })).toBeVisible();
+  await viewerPage.getByLabel("姓名（已有账号可留空）").fill("E2E 阅读者");
+  await viewerPage.getByLabel("密码").fill(viewerPassword);
+  await viewerPage.getByRole("button", { name: "接受邀请并加入" }).click();
+  await expect(viewerPage.getByRole("heading", { name: "给团队知识，一个好去处。" })).toBeVisible();
+
+  await membersDialog.getByRole("button", { name: "关闭对话框" }).click();
+  await page.getByRole("button", { name: "新建文档" }).click();
+  let createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("文档标题").fill("团队公开说明");
+  await createDialog.getByLabel("Markdown 正文").fill("# 团队说明\n\n欢迎来到知屿。\n\n- 协作\n- 沉淀\n");
+  await createDialog.getByRole("button", { name: "创建文档" }).click();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  const publicDocId = new URL(page.url()).searchParams.get("doc");
+  const teamId = new URL(page.url()).searchParams.get("team");
+  const spaceId = new URL(page.url()).searchParams.get("space");
+  expect(publicDocId).toBeTruthy(); expect(teamId).toBeTruthy(); expect(spaceId).toBeTruthy();
+
+  await page.getByRole("tab", { name: "富文本" }).click();
+  const editor = page.locator(".ProseMirror");
+  await expect(editor).toBeVisible();
+  await editor.click(); await page.keyboard.press("End"); await page.keyboard.type(" 安全编辑");
+  await page.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText(/已保存 · v2/)).toBeVisible();
+  const saved = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, publicDocId);
+  expect(saved.body).toContain("安全编辑");
+
+  await page.getByRole("button", { name: "新建文档" }).click();
+  createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("文档标题").fill("受限项目计划");
+  await createDialog.getByLabel("Markdown 正文").fill("内部计划，仅读者授权后可见。");
+  await createDialog.getByRole("button", { name: "创建文档" }).click();
+  const restrictedDocId = new URL(page.url()).searchParams.get("doc");
+  expect(restrictedDocId).toBeTruthy();
+  await page.getByRole("button", { name: "访问权限" }).click();
+  const accessDialog = page.getByRole("dialog");
+  await accessDialog.getByLabel("访问范围").selectOption("restricted");
+  await accessDialog.getByRole("button", { name: "保存权限" }).click();
+  await expect(page.getByText("访问权限已更新。" )).toBeVisible();
+
+  await page.getByRole("button", { name: "新建文档" }).click();
+  createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("文档标题").fill("延迟响应目标");
+  await createDialog.getByLabel("Markdown 正文").fill("登出竞态的目标文档。");
+  await createDialog.getByRole("button", { name: "创建文档" }).click();
+  const delayedDocId = new URL(page.url()).searchParams.get("doc");
+  expect(delayedDocId).toBeTruthy();
+
+  await page.getByRole("button", { name: "新建文档" }).click();
+  createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("文档标题").fill("表格无损保护");
+  await createDialog.getByLabel("Markdown 正文").fill("| 名称 | 说明 |\n| --- | --- |\n| 知屿 | 文档 |\n");
+  await createDialog.getByRole("button", { name: "创建文档" }).click();
+  const tableDocId = new URL(page.url()).searchParams.get("doc");
+  await page.getByRole("tab", { name: "富文本" }).click();
+  const tableCell = page.locator(".ProseMirror table td p").first();
+  await tableCell.click(); await page.keyboard.press("End"); await page.keyboard.press("Enter");
+  await expect(page.locator(".ProseMirror table td").first().locator("p")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "保存" })).toBeDisabled();
+  await expect(page.getByText(/无法安全保存的结构/)).toBeVisible();
+  const [richDownload] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "下载富文本草稿" }).click()]);
+  expect(richDownload.suggestedFilename()).toBe("teamshelf-rich-draft.json");
+  const unchanged = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, tableDocId);
+  expect(unchanged.body).toContain("| 知屿 | 文档 |");
+  page.once("dialog", dialog => dialog.accept());
+  await page.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
+  const publicUrl = `/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`;
+  await viewerPage.goto(publicUrl);
+  await expect(viewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(viewerPage.getByLabel("Markdown 正文")).toBeDisabled();
+  await expect(viewerPage.getByRole("button", { name: "保存" })).toHaveCount(0);
+  await expect(viewerPage.locator(".markdown-preview")).toContainText("安全编辑");
+  await viewerPage.screenshot({ path: "test-results/teamshelf-desktop.png", fullPage: true });
+  await viewerPage.setViewportSize({ width: 375, height: 812 });
+  await viewerPage.screenshot({ path: "test-results/teamshelf-mobile-375.png", fullPage: true });
+
+  const restrictedUrl = `/?team=${teamId}&space=${spaceId}&doc=${restrictedDocId}`;
+  await viewerPage.goto(restrictedUrl);
+  await expect(viewerPage.getByText("访问权限或文档状态已变化")).toBeVisible();
+  await expect(viewerPage.getByText("受限项目计划")).toHaveCount(0);
+  const forbidden = await viewerPage.evaluate(async id => (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).status, restrictedDocId);
+  expect(forbidden).toBe(404);
+
+  await page.goto(publicUrl);
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await page.getByRole("tab", { name: "源码" }).click();
+  const source = page.getByLabel("Markdown 正文");
+  await source.fill("# 本地草稿\n\n保留在浏览器会话中。\n");
+  const responseStatus = await page.evaluate(async id => {
+    const current = await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json();
+    const result = await fetch(`/api/documents/${id}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "TeamShelf" }, body: JSON.stringify({ title: current.document.title, body: `${current.document.body}\n并发服务器修改`, version: current.document.version }) });
+    return result.status;
+  }, publicDocId);
+  expect(responseStatus).toBe(200);
+  await page.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText(/保存时发现新版本/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "下载草稿" })).toBeVisible();
+  await expect(source).toHaveValue(/本地草稿/);
+
+  page.once("dialog", dialog => dialog.accept());
+  await page.reload();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByLabel("Markdown 正文")).toHaveValue(/本地草稿/);
+  await expect(page).toHaveURL(new RegExp(`doc=${publicDocId}`));
+  let releaseDelayed!: () => void;
+  let markFetchStarted!: () => void;
+  const fetchStarted = new Promise<void>(resolve => { markFetchStarted = resolve; });
+  const delayedResponse = new Promise<void>(resolve => { releaseDelayed = resolve; });
+  await page.route(`**/api/documents/${delayedDocId}`, async route => {
+    const response = await route.fetch();
+    markFetchStarted();
+    await delayedResponse;
+    await route.fulfill({ response });
+  });
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "延迟响应目标" }).click();
+  await fetchStarted;
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  releaseDelayed();
+  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  await expect(page.getByText("登出竞态的目标文档。")).toHaveCount(0);
+  const remainingDrafts = await page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith("teamshelf:draft:")));
+  expect(remainingDrafts).toEqual([]);
+  await viewerContext.close();
+});
