@@ -1,0 +1,30 @@
+services:
+  teamshelf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: teamshelf:local
+    ports:
+      - "${PORT:-8080}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      APP_ORIGIN: "${APP_ORIGIN:?Set APP_ORIGIN in .env to the exact browser origin}"
+      SETUP_TOKEN: "${SETUP_TOKEN:?Run npm run configure or set a strong one-time token}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      DATA_DIR: /app/data
+    volumes:
+      - teamshelf-data:/app/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  teamshelf-data:

@@ -8,14 +8,18 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "dev": "concurrently -k -n api,web \"tsx watch src/server/index.ts\" \"vite --host 0.0.0.0\"",
+    "configure": "node scripts/configure.mjs",
+    "dev": "concurrently -k -n api,web \"cross-env PORT=3000 APP_ORIGIN=http://localhost:5173 COOKIE_SECURE=false node --env-file-if-exists=.env --import tsx/esm --watch src/server/index.ts\" \"vite --host 0.0.0.0\"",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
-    "start": "node dist/server/index.js",
-    "test": "vitest run",
+    "start": "node --env-file-if-exists=.env dist/server/index.js",
+    "backup": "node scripts/backup.mjs",
+    "restore": "node scripts/restore.mjs",
+    "test": "vitest run && node --test tests/ops/ops.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:ops": "node --test tests/ops/ops.test.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
@@ -50,6 +54,7 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "concurrently": "10.0.5",
+    "cross-env": "10.1.0",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "8.3.1",
