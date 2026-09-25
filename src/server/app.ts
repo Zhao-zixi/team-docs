@@ -89,6 +89,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     try {
       const policy = request.routeOptions.config.agentAccess;
       const params = request.params as Record<string, unknown>;
+      const targetType = policy?.documentParam ? 'document' : policy?.spaceParam ? 'space' : 'team';
       const targetId = (policy?.documentParam && params[policy.documentParam])
         ?? (policy?.spaceParam && params[policy.spaceParam])
         ?? (policy?.teamParam && params[policy.teamParam])
@@ -96,7 +97,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
         ?? principal.teamId;
       db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json)
         VALUES(?,?,?,?,?,?,?,?)`).run(randomUUID(), principal.teamId, principal.userId,
-        `agent.${request.url.startsWith('/mcp') ? 'mcp.call' : policy?.operation ?? 'blocked.route'}`, 'agent-operation', typeof targetId === 'string' ? targetId : null,
+        `agent.${request.url.startsWith('/mcp') ? 'mcp.call' : policy?.operation ?? 'blocked.route'}`, targetType, typeof targetId === 'string' ? targetId : null,
         new Date().toISOString(), JSON.stringify({ credentialId: principal.credentialId, route: request.routeOptions.url, method: request.method, statusCode: reply.statusCode }));
     } catch { /* Keep audit failures from changing an already-produced response. */ }
   });  app.addHook('onSend', async (request, reply, payload) => {
@@ -138,7 +139,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     if (request.headers.cookie !== undefined || !authorization?.startsWith('Bearer ') || authorization.length <= 7) throw unauthorized();
     if (!host) throw new HttpError(400, 'INVALID_HOST', '请求主机无效。');
     let hostname: string;
-    try { hostname = new URL(`http://${host}`).hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
+    try { const hostUrl = new URL('http://' + host); if (hostUrl.username || hostUrl.password || hostUrl.pathname !== '/' || hostUrl.search || hostUrl.hash) throw new Error('invalid host'); hostname = hostUrl.hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
     catch { throw new HttpError(400, 'INVALID_HOST', '请求主机无效。'); }
     const configuredHost = config.appOrigin ? new URL(config.appOrigin).hostname.toLowerCase().replace(/^\[|\]$/g, '') : '';
     if (hostname !== configuredHost && !['localhost', '127.0.0.1', '::1'].includes(hostname)) throw new HttpError(403, 'HOST_REJECTED', '请求主机不允许。');
