@@ -1,0 +1,35 @@
+name: ${TEAMSHELF_COMPOSE_PROJECT:?Set TEAMSHELF_COMPOSE_PROJECT to the existing Compose project name}
+services:
+  teamshelf:
+    image: ${TEAMSHELF_IMAGE_REF:?Set TEAMSHELF_IMAGE_REF to a full GHCR digest reference}
+    ports:
+      - "${PORT:-8080}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      APP_ORIGIN: "${APP_ORIGIN:?Set APP_ORIGIN in the local .env}"
+      SETUP_TOKEN: "${SETUP_TOKEN:?Set SETUP_TOKEN in the local .env}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      DATA_DIR: /app/data
+    volumes:
+      - teamshelf-data:/app/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+volumes:
+  teamshelf-data:
+    external: true
+    name: ${TEAMSHELF_DATA_VOLUME:?Set TEAMSHELF_DATA_VOLUME to the existing Docker volume name}
