@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, tests, build, and E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck client and server
+        run: npm run typecheck
+      - name: Unit, API, and operations tests
+        run: npm test
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Production browser E2E
+        run: npm run test:e2e
+      - name: Build and test the production stdio bridge
+        run: npm run test:stdio:production
+
+  docker-smoke:
+    name: Docker build and hardened health smoke
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build local image
+        run: docker build --pull --tag teamshelf:ci .
+      - name: Run and inspect hardened container
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="teamshelf-ci-${GITHUB_RUN_ID}"
+          volume="teamshelf-ci-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm --force "$name" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume" >/dev/null
+          docker run --detach --name "$name" \
+            --publish 18080:3000 \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --volume "$volume:/app/data" \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --env NODE_ENV=production \
+            --env PORT=3000 \
+            --env DATA_DIR=/app/data \
+            --env APP_ORIGIN=http://127.0.0.1:18080 \
+            --env COOKIE_SECURE=false \
+            --env SETUP_TOKEN=ci-only-ephemeral-setup-token-not-for-production \
+            teamshelf:ci >/dev/null
+          user="$(docker inspect --format '{{.Config.User}}' "$name")"
+          read_only="$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$name")"
+          caps="$(docker inspect --format '{{join .HostConfig.CapDrop ","}}' "$name")"
+          security="$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$name")"
+          test "$user" = node
+          test "$read_only" = true
+          test "$caps" = ALL
+          [[ "$security" == *no-new-privileges:true* ]]
+          for attempt in $(seq 1 45); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || true)"
+            if [[ "$health" == healthy ]]; then break; fi
+            if [[ "$health" == unhealthy ]]; then docker logs "$name"; exit 1; fi
+            sleep 2
+          done
+          test "${health:-}" = healthy || { docker logs "$name"; exit 1; }
+          curl --fail --silent --show-error http://127.0.0.1:18080/api/health

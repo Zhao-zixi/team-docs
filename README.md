@@ -2,6 +2,10 @@
 
 面向团队的文档库，支持 Markdown 文档、团队空间和分层访问控制。应用采用 Node.js 24、Fastify、SQLite 和 React；所有正文以 Markdown 源码保存。
 
+## GitHub CI/CD
+
+PR 与 main 更新会执行 Node 24 类型检查、API/单元/运维测试、生产 Playwright、stdio 桥验证和加固 Docker 容器健康检查。只有所有检查通过的 main 提交会发布带完整提交 SHA 的 GHCR 多架构镜像；部署入口和前置配置见 [`docs/CICD.md`](docs/CICD.md)。
+
 ## 本机启动
 
 在 Windows PowerShell 中，进入项目目录并运行：
