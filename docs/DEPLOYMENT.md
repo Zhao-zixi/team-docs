@@ -67,7 +67,7 @@ node scripts/backup.mjs 'D:\TeamShelf\backups\teamshelf-backup.sqlite'
 
 脚本使用 Node SQLite 在线备份 API，备份期间可继续使用应用；目标文件已存在时会拒绝覆盖。备份中包含用户凭据哈希和文档内容，应限制备份目录访问权限。
 
-恢复前先停止应用，并确认 `DATA_DIR/.teamshelf.lock` 已消失。Compose 部署执行：
+恢复前先停止应用，并确认 `DATA_DIR/.teamshelf.lock` 已消失。服务正常关闭会自动移除锁；若异常终止留下锁，先确认所有 TeamShelf 实例已停止，再手动删除该锁文件。启动程序和恢复脚本都不会自动清理残留锁。Compose 部署执行：
 
 ```sh
 docker compose stop teamshelf
@@ -75,7 +75,7 @@ docker compose run --rm --no-deps -v /volume1/backups/teamshelf.sqlite:/backup.s
 docker compose start teamshelf
 ```
 
-将命令中的 `/volume1/backups/teamshelf.sqlite` 替换为 NAS 上实际备份文件的绝对路径；也可在 NAS 宿主机上将 `DATA_DIR` 指向数据目录运行脚本。脚本要求显式 `--confirm`，校验源库的 `PRAGMA integrity_check`，遇到活动服务锁即拒绝；成功前会将当前数据库保存成带时间戳的 `.rollback-*.sqlite` 副本，再清除已停止服务留下的 WAL/SHM 边车文件并安装恢复库。启动失败时停止应用，使用回滚副本再次运行 restore。恢复完成后所有现有会话都会失效，用户需要重新登录；尚未使用的邀请会被撤销，管理员需重新发送邀请。文档正文和已使用邀请记录会保留。
+将命令中的 `/volume1/backups/teamshelf.sqlite` 替换为 NAS 上实际备份文件的绝对路径；也可在 NAS 宿主机上将 `DATA_DIR` 指向数据目录运行脚本。脚本要求显式 `--confirm`，校验源库的 `PRAGMA integrity_check`，遇到任何现存锁即拒绝（请先确认所有实例停止，再人工清理残留锁）；成功前会将当前数据库保存成带时间戳的 `.rollback-*.sqlite` 副本，再清除已停止服务留下的 WAL/SHM 边车文件并安装恢复库。启动失败时停止应用，使用回滚副本再次运行 restore。恢复完成后所有现有会话都会失效，用户需要重新登录；尚未使用的邀请会被撤销，管理员需重新发送邀请。文档正文和已使用邀请记录会保留。
 
 ## 升级与回滚
 
