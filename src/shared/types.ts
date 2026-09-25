@@ -2,6 +2,24 @@ export type TeamRole = 'owner' | 'admin' | 'editor' | 'viewer';
 export type GrantRole = 'viewer' | 'editor';
 export type Visibility = 'team' | 'restricted';
 export type DocumentVisibility = 'inherit' | 'restricted';
+export type AgentScope = 'read' | 'write' | 'manage';
+
+export interface AgentCredentialSummary {
+  id: string;
+  userId: string;
+  userName: string;
+  name: string;
+  teamId: string;
+  spaceId: string | null;
+  spaceName?: string;
+  scope: AgentScope;
+  tokenHint: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  canRevoke: boolean;
+}
 
 export interface User {
   id: string;

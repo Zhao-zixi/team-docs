@@ -45,6 +45,9 @@ interface Document extends DocumentSummary {
 | POST `/auth/password` | `{currentPassword,newPassword}` | `{ok:true}` 并撤销所有旧 sessions |
 
 密码长度 12–128。Setup token 必须与环境配置匹配，不向客户端返回；错误 token 不应消耗初始化机会。
+## Agent 凭据
+
+凭据管理只接受浏览器 session cookie，并继续要求 `X-Requested-With: TeamShelf`；REST 认证禁止 Bearer。创建时 `POST /agent-tokens` 接收 `{name,teamId,scope?,spaceId?,expiresInDays?}`，scope 默认 `read`、有效期默认 30 天且最大 90 天。成功只返回一次明文 `{credential,token}`；列表及后续查询仅返回 `AgentCredentialSummary` 元数据，不返回 token 或 hash。`GET /agent-tokens` 列出当前用户所有团队的凭据；owner/admin 可通过 `GET /teams/:teamId/agent-tokens` 查看本团队元数据。`DELETE /agent-tokens/:id` 撤销，权限按当前团队角色检查。scope 上限为 viewer=`read`、editor=`write`、admin/owner=`manage`；spaceId 必须属于指定团队且签发人当前可读。凭据字段见 `src/shared/types.ts`。
 
 ## 团队、成员与邀请
 
