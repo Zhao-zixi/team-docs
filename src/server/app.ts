@@ -9,6 +9,8 @@ import { readConfig } from './config.js';
 import type { Db } from './db.js';
 import { openDatabase } from './db.js';
 import { registerAuthRoutes } from './auth.js';
+import { registerTeamRoutes } from './teams.js';
+import { registerContentRoutes } from './content.js';
 import { HttpError } from './errors.js';
 
 export interface CreateAppOptions {
@@ -77,10 +79,20 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     if ((error as { name?: string }).name === 'ZodError' || statusCode === 400) {
       return reply.code(400).send({ error: { code: 'BAD_REQUEST', message: '请求内容格式无效。' } });
     }
+    if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
+      const code = statusCode === 413 ? 'PAYLOAD_TOO_LARGE' : statusCode === 404 ? 'NOT_FOUND' : 'BAD_REQUEST';
+      const message = statusCode === 413 ? '请求内容超过大小限制。' : statusCode === 404 ? '资源不存在或不可访问。' : '请求无法处理。';
+      return reply.code(statusCode).send({ error: { code, message } });
+    }
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: '服务器暂时无法处理请求。' } });
   });
   app.get('/api/health', async () => ({ ok: true }));
-  app.register(async (api) => registerAuthRoutes(api, { db, config }), { prefix: '/api' });
+  app.register(async (api) => {
+    const context = { db, config };
+    registerAuthRoutes(api, context);
+    registerTeamRoutes(api, context);
+    registerContentRoutes(api, context);
+  }, { prefix: '/api' });
   const serveClient = options.serveClient ?? config.isProduction;
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith('/api/')) {

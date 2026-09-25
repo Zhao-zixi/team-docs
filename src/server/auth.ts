@@ -9,7 +9,7 @@ import { expiresInDays, hashPassword, hashToken, isoNow, newToken, safeSecretEqu
 import { validateBody } from './validation.js';
 
 const SESSION_COOKIE = 'teamshelf_session';
-const SESSION_TTL_DAYS = 7;
+export const SESSION_TTL_DAYS = 7;
 const EmailSchema = z.string().trim().email().max(254);
 const NameSchema = z.string().trim().min(1).max(80);
 const PasswordSchema = z.string().min(12).max(128);
@@ -49,7 +49,7 @@ function cookieToken(request: FastifyRequest): string | undefined {
   return cookies?.[SESSION_COOKIE];
 }
 
-function setSessionCookie(reply: FastifyReply, config: AppConfig, token: string): void {
+export function setSessionCookie(reply: FastifyReply, config: AppConfig, token: string): void {
   reply.setCookie(SESSION_COOKIE, token, cookieOptions(config));
 }
 
@@ -57,11 +57,19 @@ function clearSessionCookie(reply: FastifyReply, config: AppConfig): void {
   reply.clearCookie(SESSION_COOKIE, cookieOptions(config));
 }
 
-function createSession(db: Db, userId: string): string {
+export function createSession(db: Db, userId: string): string {
   const token = newToken();
   db.prepare('INSERT INTO sessions(id, token_hash, user_id, created_at, expires_at) VALUES(?,?,?,?,?)')
     .run(randomUUID(), hashToken(token), userId, isoNow(), expiresInDays(SESSION_TTL_DAYS));
   return token;
+}
+
+export function createSessionAfterPasswordCheck(db: Db, userId: string, verifiedHash: string): string {
+  return transaction(db, () => {
+    const latest = db.prepare('SELECT password_hash FROM users WHERE id=?').get(userId) as { password_hash: string } | undefined;
+    if (!latest || latest.password_hash !== verifiedHash) throw unauthorized();
+    return createSession(db, userId);
+  });
 }
 
 export function requireUserId(db: Db, request: FastifyRequest): string {
@@ -124,7 +132,7 @@ export function registerAuthRoutes(app: FastifyInstance, { db, config }: AuthOpt
     const row = db.prepare('SELECT id,email,name,password_hash FROM users WHERE normalized_email=?')
       .get(body.email.trim().toLowerCase()) as UserRow | undefined;
     if (!row || !(await verifyPassword(body.password, row.password_hash))) throw unauthorized();
-    const token = transaction(db, () => createSession(db, row.id));
+    const token = createSessionAfterPasswordCheck(db, row.id, row.password_hash);
     setSessionCookie(reply, config, token);
     return { user: { id: row.id, email: row.email, name: row.name }, teams: listUserTeams(db, row.id) };
   });

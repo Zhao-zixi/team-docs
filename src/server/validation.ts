@@ -9,3 +9,11 @@ export function validateBody(schema: ZodType) {
     (request as FastifyRequest & { body: unknown }).body = parsed.data;
   };
 }
+
+export function validateParams(schema: ZodType) {
+  return async (request: FastifyRequest): Promise<void> => {
+    const parsed = schema.safeParse(request.params);
+    if (!parsed.success) throw badRequest('请求路径格式无效。');
+    (request as FastifyRequest & { params: unknown }).params = parsed.data;
+  };
+}

@@ -3,8 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/server/app.js';
+import { createSessionAfterPasswordCheck } from '../../src/server/auth.js';
 import type { AppConfig } from '../../src/server/config.js';
 import { openDatabase } from '../../src/server/db.js';
+import { verifyPassword } from '../../src/server/security.js';
 import type { Db } from '../../src/server/db.js';
 
 const origin = 'http://localhost:5173';
@@ -128,6 +130,9 @@ describe('setup and session authentication', () => {
   it('requires a strong password and revokes all old sessions after password change', async () => {
     const setupResponse = await setup();
     const cookie = (setupResponse.headers['set-cookie'] as string).split(';')[0];
+    const userId = setupResponse.json().user.id as string;
+    const staleHash = (db.prepare('SELECT password_hash FROM users WHERE id=?').get(userId) as { password_hash: string }).password_hash;
+    expect(await verifyPassword(password, staleHash)).toBe(true);
     const weak = await app.inject({
       method: 'POST', url: '/api/auth/password', headers: { ...csrf, cookie },
       payload: { currentPassword: password, newPassword: 'short' },
@@ -139,6 +144,10 @@ describe('setup and session authentication', () => {
     });
     expect(changed.statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(401);
+    expect(() => createSessionAfterPasswordCheck(db, userId, staleHash)).toThrow();
+    expect((db.prepare('SELECT COUNT(*) AS count FROM sessions WHERE user_id=?').get(userId) as { count: number }).count).toBe(0);
+    const staleLogin = await app.inject({ method: 'POST', url: '/api/auth/login', headers: csrf, payload: { email: 'owner@example.com', password } });
+    expect(staleLogin.statusCode).toBe(401);
     const login = await app.inject({
       method: 'POST', url: '/api/auth/login', headers: csrf,
       payload: { email: 'owner@example.com', password: 'a new correct horse battery staple 8' },

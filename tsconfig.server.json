@@ -4,12 +4,17 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "rootDir": "src",
-    "outDir": "dist/server",
+    "outDir": "dist",
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "sourceMap": true
   },
-  "include": ["src/server/**/*.ts", "src/shared/**/*.ts"]
+  "include": [
+    "src/server/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
 }

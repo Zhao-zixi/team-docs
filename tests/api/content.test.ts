@@ -1,0 +1,255 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import { createApp } from '../../src/server/app.js';
+import { openDatabase, type Db } from '../../src/server/db.js';
+import { hashToken, isoNow } from '../../src/server/security.js';
+
+interface Fixture {
+  owner: string; editor: string; viewer: string; spaceViewer: string; docOnly: string; otherOwner: string;
+  team: string; otherTeam: string; teamSpace: string; restrictedSpace: string; otherSpace: string;
+  inherited: string; docRestricted: string; nested: string; nestedNoGrant: string; otherDoc: string;
+  tokens: Record<string, string>;
+}
+
+let root: string;
+let db: Db;
+let app: FastifyInstance;
+let f: Fixture;
+
+function addMember(teamId: string, userId: string, role: string) {
+  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(teamId, userId, role, isoNow());
+}
+
+function addSpace(teamId: string, creatorId: string, name: string, visibility: 'team' | 'restricted') {
+  const id = randomUUID();
+  db.prepare(`INSERT INTO spaces(id,team_id,name,description,visibility,created_by,created_at) VALUES(?,?,?,'',?,?,?)`)
+    .run(id, teamId, name, visibility, creatorId, isoNow());
+  return id;
+}
+
+function addDocument(spaceId: string, userId: string, title: string, body: string, visibility: 'inherit' | 'restricted' = 'inherit') {
+  const id = randomUUID();
+  const now = isoNow();
+  db.prepare(`INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at)
+    VALUES(?,?,?,?,?,1,?,?,?,?)`).run(id, spaceId, title, body, visibility, userId, now, userId, now);
+  db.prepare(`INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name)
+    VALUES(?,?,1,?,?,?,?,?)`).run(randomUUID(), id, title, body, now, userId, 'Seed User');
+  return id;
+}
+
+function addGrant(table: 'space_grants' | 'document_grants', key: 'space_id' | 'document_id', resourceId: string, userId: string, role: string) {
+  db.prepare(`INSERT INTO ${table}(${key},user_id,role) VALUES(?,?,?)`).run(resourceId, userId, role);
+}
+
+beforeEach(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-content-'));
+  db = openDatabase(root);
+  const ids = {
+    owner: randomUUID(), editor: randomUUID(), viewer: randomUUID(), spaceViewer: randomUUID(),
+    docOnly: randomUUID(), otherOwner: randomUUID(), team: randomUUID(), otherTeam: randomUUID(),
+  };
+  const now = isoNow();
+  const userInsert = db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)');
+  for (const [key, id] of Object.entries(ids).filter(([key]) => !['team', 'otherTeam'].includes(key))) {
+    userInsert.run(id, `${key}@example.test`, `${key}@example.test`, key, 'not-used', now);
+  }
+  db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(ids.team, 'Content Team', now);
+  db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(ids.otherTeam, 'Other Team', now);
+  addMember(ids.team, ids.owner, 'owner');
+  addMember(ids.team, ids.editor, 'editor');
+  addMember(ids.team, ids.viewer, 'viewer');
+  addMember(ids.team, ids.spaceViewer, 'editor');
+  addMember(ids.team, ids.docOnly, 'editor');
+  addMember(ids.otherTeam, ids.otherOwner, 'owner');
+
+  const teamSpace = addSpace(ids.team, ids.owner, 'Team Space', 'team');
+  const restrictedSpace = addSpace(ids.team, ids.owner, 'Restricted Space', 'restricted');
+  const otherSpace = addSpace(ids.otherTeam, ids.otherOwner, 'Other Space', 'team');
+  addGrant('space_grants', 'space_id', restrictedSpace, ids.spaceViewer, 'viewer');
+
+  const inherited = addDocument(teamSpace, ids.owner, 'Open notes', '# Visible needle\n**Markdown** stays intact.');
+  const docRestricted = addDocument(teamSpace, ids.owner, 'Restricted notes', 'Secret needle belongs only to a document grant.', 'restricted');
+  addGrant('document_grants', 'document_id', docRestricted, ids.viewer, 'editor');
+  addGrant('document_grants', 'document_id', docRestricted, ids.editor, 'editor');
+  const nested = addDocument(restrictedSpace, ids.owner, 'Nested restricted', 'Nested secret needle.', 'restricted');
+  addGrant('document_grants', 'document_id', nested, ids.spaceViewer, 'editor');
+  const nestedNoGrant = addDocument(restrictedSpace, ids.owner, 'No document grant', 'Do not disclose nested body.', 'restricted');
+  addGrant('document_grants', 'document_id', nestedNoGrant, ids.docOnly, 'editor');
+  const otherDoc = addDocument(otherSpace, ids.otherOwner, 'Cross team secret', 'Never visible across teams.');
+
+  const tokens: Record<string, string> = {};
+  for (const [key, userId] of Object.entries(ids).filter(([key]) => !['team', 'otherTeam'].includes(key))) {
+    const token = `test-session-${key}-${randomUUID()}`;
+    tokens[key] = token;
+    db.prepare('INSERT INTO sessions(id,token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?,?)')
+      .run(randomUUID(), hashToken(token), userId, now, new Date(Date.now() + 86_400_000).toISOString());
+  }
+  f = { ...ids, teamSpace, restrictedSpace, otherSpace, inherited, docRestricted, nested, nestedNoGrant, otherDoc, tokens };
+  app = createApp({
+    db,
+    config: { port: 3000, dataDir: root, appOrigin: 'http://localhost:5173', setupToken: 'unused-test-token', cookieSecure: false, isProduction: false },
+    logger: false,
+    serveClient: false,
+  });
+  await app.ready();
+});
+
+afterEach(async () => {
+  await app.close();
+  db.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+function request(user: keyof Fixture['tokens'], method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: unknown) {
+  const headers: Record<string, string> = { cookie: `teamshelf_session=${f.tokens[user]}` };
+  if (method !== 'GET') headers['x-requested-with'] = 'TeamShelf';
+  if (payload !== undefined) headers['content-type'] = 'application/json';
+  return app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
+}
+
+function docAccess(userId: string, documentId: string, role: string) {
+  addGrant('document_grants', 'document_id', documentId, userId, role);
+}
+
+describe('content and ACL API', () => {
+  it('filters spaces and documents by the shared layered ACL, including cross-team isolation', async () => {
+    const ownerSpaces = await request('owner', 'GET', `/api/teams/${f.team}/spaces`);
+    expect(ownerSpaces.statusCode).toBe(200);
+    expect(ownerSpaces.json().spaces.map((space: { id: string }) => space.id)).toContain(f.restrictedSpace);
+
+    const viewerSpaces = await request('viewer', 'GET', `/api/teams/${f.team}/spaces`);
+    expect(viewerSpaces.json().spaces.map((space: { id: string }) => space.id)).toEqual([f.teamSpace]);
+    const spaceViewerSpaces = await request('spaceViewer', 'GET', `/api/teams/${f.team}/spaces`);
+    expect(spaceViewerSpaces.json().spaces.map((space: { id: string }) => space.id)).toContain(f.restrictedSpace);
+
+    const viewerDocs = await request('viewer', 'GET', `/api/spaces/${f.teamSpace}/documents`);
+    const viewerDocIds = viewerDocs.json().documents.map((doc: { id: string }) => doc.id);
+    expect(viewerDocIds).toContain(f.inherited);
+    expect(viewerDocIds).toContain(f.docRestricted);
+    expect(viewerDocs.json().documents.find((doc: { id: string }) => doc.id === f.docRestricted).canEdit).toBe(false);
+    expect((await request('viewer', 'GET', `/api/documents/${f.nested}`)).statusCode).toBe(404);
+
+    const spaceViewerDocs = await request('spaceViewer', 'GET', `/api/spaces/${f.restrictedSpace}/documents`);
+    expect(spaceViewerDocs.json().documents.map((doc: { id: string }) => doc.id)).toEqual([f.nested]);
+    expect(spaceViewerDocs.json().documents[0].canEdit).toBe(false);
+    expect((await request('docOnly', 'GET', `/api/documents/${f.nestedNoGrant}`)).statusCode).toBe(404);
+    expect((await request('owner', 'GET', `/api/documents/${f.otherDoc}`)).statusCode).toBe(404);
+    expect((await request('owner', 'GET', '/api/teams/' + f.otherTeam + '/search?q=Cross')).statusCode).toBe(404);
+  });
+
+  it('searches only documents visible to the requester and does not leak hidden match counts or excerpts', async () => {
+    const viewerSearch = await request('viewer', 'GET', `/api/teams/${f.team}/search?q=needle`);
+    const viewerIds = viewerSearch.json().documents.map((doc: { id: string }) => doc.id);
+    expect(viewerIds).toContain(f.inherited);
+    expect(viewerIds).toContain(f.docRestricted);
+    expect(viewerIds).not.toContain(f.nested);
+    expect(viewerSearch.json().documents.some((doc: { excerpt: string }) => doc.excerpt.includes('Nested secret'))).toBe(false);
+
+    const spaceViewerSearch = await request('spaceViewer', 'GET', `/api/teams/${f.team}/search?q=Nested`);
+    expect(spaceViewerSearch.json().documents.map((doc: { id: string }) => doc.id)).toEqual([f.nested]);
+    const badQuery = await request('viewer', 'GET', `/api/teams/${f.team}/search?q=%20%20`);
+    expect(badQuery.statusCode).toBe(400);
+    expect((await request('viewer', 'GET', `/api/teams/${f.team}/search?q=${'x'.repeat(101)}`)).statusCode).toBe(400);
+  });
+
+  it('preserves Markdown export bytes and safely encodes the attachment filename', async () => {
+    const response = await request('viewer', 'GET', `/api/documents/${f.inherited}/export`);
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/markdown');
+    expect(response.headers['content-disposition']).toContain("filename*=UTF-8''");
+    expect(response.body).toBe('# Visible needle\n**Markdown** stays intact.');
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect((await request('spaceViewer', 'GET', `/api/documents/${f.nestedNoGrant}/export`)).statusCode).toBe(404);
+  });
+
+  it('applies optimistic content updates atomically, preserves raw Markdown, and stores revisions and audit', async () => {
+    const editedBody = '# Header\n\n- [ ] task\n\n` code  `\n';
+    const first = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Edited title', body: editedBody, version: 1 });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().document.body).toBe(editedBody);
+    expect(first.json().document.version).toBe(2);
+
+    const stale = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Overwrite', body: 'bad', version: 1 });
+    expect(stale.statusCode).toBe(409);
+    const unchanged = await request('viewer', 'GET', `/api/documents/${f.inherited}`);
+    expect(unchanged.json().document.title).toBe('Edited title');
+    expect(unchanged.json().document.body).toBe(editedBody);
+    expect((await request('viewer', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Forbidden', body: 'x', version: 2 })).statusCode).toBe(403);
+
+    const revisions = await request('viewer', 'GET', `/api/documents/${f.inherited}/revisions`);
+    expect(revisions.json().revisions.map((revision: { version: number }) => revision.version)).toEqual([2, 1]);
+    const audit = await request('owner', 'GET', `/api/teams/${f.team}/audit`);
+    expect(audit.json().events.some((event: { action: string; targetId: string }) => event.action === 'document.update' && event.targetId === f.inherited)).toBe(true);
+    expect((await request('editor', 'GET', `/api/teams/${f.team}/audit`)).statusCode).toBe(403);
+  });
+
+  it('restricts ACL mutations and space/document management, validates grants atomically', async () => {
+    const created = await request('owner', 'POST', `/api/teams/${f.team}/spaces`, {
+      name: 'New restricted', visibility: 'restricted', grants: [{ userId: f.viewer, role: 'viewer' }],
+    });
+    expect(created.statusCode).toBe(201);
+    const newSpaceId = created.json().space.id;
+    expect((await request('viewer', 'GET', `/api/spaces/${newSpaceId}/documents`)).statusCode).toBe(200);
+    expect((await request('editor', 'POST', `/api/teams/${f.team}/spaces`, { name: 'Nope' })).statusCode).toBe(403);
+
+    const before = db.prepare('SELECT COUNT(*) AS count FROM spaces WHERE team_id=?').get(f.team) as { count: number };
+    const crossTeam = await request('owner', 'POST', `/api/teams/${f.team}/spaces`, {
+      name: 'Invalid grant', visibility: 'restricted', grants: [{ userId: f.otherOwner, role: 'editor' }],
+    });
+    expect(crossTeam.statusCode).toBe(400);
+    const after = db.prepare('SELECT COUNT(*) AS count FROM spaces WHERE team_id=?').get(f.team) as { count: number };
+    expect(after.count).toBe(before.count);
+
+    const access = await request('owner', 'PUT', `/api/spaces/${newSpaceId}/access`, { visibility: 'restricted', grants: [{ userId: f.editor, role: 'editor' }] });
+    expect(access.statusCode).toBe(200);
+    expect(access.json().grants).toEqual([{ userId: f.editor, role: 'editor' }]);
+    expect((await request('viewer', 'PUT', `/api/spaces/${newSpaceId}/access`, { visibility: 'team', grants: [] })).statusCode).toBe(404);
+    expect((await request('owner', 'DELETE', `/api/spaces/${f.teamSpace}`)).statusCode).toBe(409);
+    expect((await request('owner', 'DELETE', `/api/spaces/${newSpaceId}`)).statusCode).toBe(200);
+
+    const restrictedCreate = await request('editor', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Private', visibility: 'restricted', grants: [] });
+    expect(restrictedCreate.statusCode).toBe(403);
+    const docCreated = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, {
+      title: 'Private for viewer', body: 'A private body.', visibility: 'restricted', grants: [{ userId: f.viewer, role: 'editor' }],
+    });
+    expect(docCreated.statusCode).toBe(201);
+    const newDocId = docCreated.json().document.id;
+    const viewerDoc = await request('viewer', 'GET', `/api/documents/${newDocId}`);
+    expect(viewerDoc.statusCode).toBe(200);
+    expect(viewerDoc.json().document.canEdit).toBe(false);
+    expect((await request('viewer', 'PUT', `/api/documents/${newDocId}/access`, { visibility: 'inherit', grants: [] })).statusCode).toBe(403);
+    expect((await request('editor', 'DELETE', '/api/documents/' + newDocId)).statusCode).toBe(404);
+    expect((await request('owner', 'DELETE', `/api/documents/${newDocId}`)).statusCode).toBe(200);
+  });
+
+  it('restores only as a manager with current version and appends a new revision', async () => {
+    const editorUpdate = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Version 2', body: 'body version 2', version: 1 });
+    expect(editorUpdate.statusCode).toBe(200);
+    const revisions = await request('owner', 'GET', `/api/documents/${f.inherited}/revisions`);
+    const versionOne = revisions.json().revisions.find((revision: { version: number }) => revision.version === 1);
+    expect(versionOne).toBeTruthy();
+
+    expect((await request('editor', 'POST', `/api/documents/${f.inherited}/revisions/${versionOne.id}/restore`, { version: 2 })).statusCode).toBe(403);
+    expect((await request('owner', 'POST', `/api/documents/${f.inherited}/revisions/${versionOne.id}/restore`, { version: 1 })).statusCode).toBe(409);
+    const restored = await request('owner', 'POST', `/api/documents/${f.inherited}/revisions/${versionOne.id}/restore`, { version: 2 });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json().document.version).toBe(3);
+    expect(restored.json().document.title).toBe('Open notes');
+    expect(restored.json().document.body).toBe('# Visible needle\n**Markdown** stays intact.');
+    const finalRevisions = await request('owner', 'GET', `/api/documents/${f.inherited}/revisions`);
+    expect(finalRevisions.json().revisions.map((revision: { version: number }) => revision.version).sort((a: number, b: number) => a - b)).toEqual([1, 2, 3]);
+  });
+
+  it('rejects oversized content and unknown mutation fields', async () => {
+    const tooLarge = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Large', body: '🧭'.repeat(130_000), version: 1 });
+    expect(tooLarge.statusCode).toBe(413);
+    const extra = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'No', body: 'x', version: 1, visibility: 'restricted' });
+    expect(extra.statusCode).toBe(400);
+    const badTitle = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: '   ', body: '' });
+    expect(badTitle.statusCode).toBe(400);
+  });
+});
