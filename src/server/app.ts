@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
@@ -11,7 +12,10 @@ import { openDatabase } from './db.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerTeamRoutes } from './teams.js';
 import { registerContentRoutes } from './content.js';
-import { HttpError } from './errors.js';
+import { HttpError, unauthorized } from './errors.js';
+import { authenticateAgentToken, authorizeAgentRoute } from './agentAuth.js';
+import { registerAgentCredentialRoutes } from './agentTokens.js';
+import { createTeamShelfMcpHandler } from './mcp.js';
 
 export interface CreateAppOptions {
   config?: AppConfig;
@@ -57,14 +61,46 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     if (origin !== undefined && origin !== config.appOrigin) {
       throw new HttpError(403, 'ORIGIN_REJECTED', '请求来源不允许。');
     }
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+    const authorization = request.headers.authorization;
+    const isAgent = authorization !== undefined;
+    if (isAgent) {
+      if (!authorization.startsWith('Bearer ') || request.headers.cookie !== undefined) throw unauthorized();
+      const principal = authenticateAgentToken(db, authorization.slice('Bearer '.length));
+      request.agentPrincipal = principal;
+      authorizeAgentRoute(db, principal, request.routeOptions.config.agentAccess, request.params);
+    }
+    if (!isAgent && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       if (request.headers['x-requested-with'] !== 'TeamShelf') {
         throw new HttpError(403, 'CSRF_REJECTED', '请求校验失败。');
       }
     }
   });
-  app.addHook('onSend', async (request, reply, payload) => {
-    if (request.url.startsWith('/api/')) reply.header('cache-control', 'no-store');
+  app.addHook('preHandler', async (request) => {
+    if (!request.agentPrincipal) return;
+    const authorization = request.headers.authorization;
+    if (!authorization?.startsWith('Bearer ') || request.headers.cookie !== undefined) throw unauthorized();
+    const principal = authenticateAgentToken(db, authorization.slice('Bearer '.length));
+    request.agentPrincipal = principal;
+    authorizeAgentRoute(db, principal, request.routeOptions.config.agentAccess, request.params);
+  });
+  app.addHook('onResponse', async (request, reply) => {
+    const principal = request.agentPrincipal;
+    if (!principal) return;
+    try {
+      const policy = request.routeOptions.config.agentAccess;
+      const params = request.params as Record<string, unknown>;
+      const targetId = (policy?.documentParam && params[policy.documentParam])
+        ?? (policy?.spaceParam && params[policy.spaceParam])
+        ?? (policy?.teamParam && params[policy.teamParam])
+        ?? principal.spaceId
+        ?? principal.teamId;
+      db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json)
+        VALUES(?,?,?,?,?,?,?,?)`).run(randomUUID(), principal.teamId, principal.userId,
+        `agent.${request.url.startsWith('/mcp') ? 'mcp.call' : policy?.operation ?? 'blocked.route'}`, 'agent-operation', typeof targetId === 'string' ? targetId : null,
+        new Date().toISOString(), JSON.stringify({ credentialId: principal.credentialId, route: request.routeOptions.url, method: request.method, statusCode: reply.statusCode }));
+    } catch { /* Keep audit failures from changing an already-produced response. */ }
+  });  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.url.startsWith('/api/') || request.url.startsWith('/mcp')) reply.header('cache-control', 'no-store');
     return payload;
   });
 
@@ -92,7 +128,36 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     registerAuthRoutes(api, context);
     registerTeamRoutes(api, context);
     registerContentRoutes(api, context);
+    registerAgentCredentialRoutes(api, context);
   }, { prefix: '/api' });
+  app.route({ method: ['GET', 'POST', 'DELETE'], url: '/mcp', handler: async (request, reply) => {
+    const host = request.headers.host;
+    const origin = request.headers.origin;
+    const authorization = request.headers.authorization;
+    if (origin !== undefined && origin !== config.appOrigin) throw new HttpError(403, 'ORIGIN_REJECTED', '请求来源不允许。');
+    if (request.headers.cookie !== undefined || !authorization?.startsWith('Bearer ') || authorization.length <= 7) throw unauthorized();
+    if (!host) throw new HttpError(400, 'INVALID_HOST', '请求主机无效。');
+    let hostname: string;
+    try { hostname = new URL(`http://${host}`).hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
+    catch { throw new HttpError(400, 'INVALID_HOST', '请求主机无效。'); }
+    const configuredHost = config.appOrigin ? new URL(config.appOrigin).hostname.toLowerCase().replace(/^\[|\]$/g, '') : '';
+    if (hostname !== configuredHost && !['localhost', '127.0.0.1', '::1'].includes(hostname)) throw new HttpError(403, 'HOST_REJECTED', '请求主机不允许。');
+    const token = authorization.slice(7);
+    const principal = authenticateAgentToken(db, token);
+    request.agentPrincipal = principal;
+    const handler = createTeamShelfMcpHandler({ app, config, principal, token });
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(request.headers)) {
+      if (typeof value === 'string' && key.toLowerCase() !== 'content-length' && key.toLowerCase() !== 'cookie') headers.set(key, value);
+    }
+    const body = request.method === 'GET' ? undefined : request.body === undefined ? undefined : JSON.stringify(request.body);
+    const webRequest = new Request(`http://${host}${request.url}`, { method: request.method, headers, body });
+    const response = await handler.fetch(webRequest);
+    response.headers.forEach((value, key) => reply.header(key, value));
+    reply.header('cache-control', 'no-store');
+    const responseBody = Buffer.from(await response.arrayBuffer());
+    return reply.code(response.status).send(responseBody);
+  }});
   const serveClient = options.serveClient ?? config.isProduction;
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith('/api/')) {

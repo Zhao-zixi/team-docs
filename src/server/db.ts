@@ -109,8 +109,32 @@ export function openDatabase(dataDir: string): Db {
       details_json TEXT NOT NULL DEFAULT '{}'
     );
     CREATE INDEX IF NOT EXISTS audit_team_idx ON audit_events(team_id, created_at DESC);
-    PRAGMA user_version = 1;
+
   `);
+  const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+  if (currentVersion > 2) throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);
+  if (currentVersion < 2) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        space_id TEXT,
+        name TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK (scope IN ('read','write','manage')),
+        token_hash TEXT NOT NULL UNIQUE,
+        token_hint TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS agent_tokens_user_idx ON agent_tokens(user_id,created_at DESC);
+      CREATE INDEX IF NOT EXISTS agent_tokens_team_idx ON agent_tokens(team_id,created_at DESC);
+      CREATE INDEX IF NOT EXISTS agent_tokens_space_idx ON agent_tokens(space_id);
+      PRAGMA user_version = 2;
+    `);
+  }
   return db;
 }
 

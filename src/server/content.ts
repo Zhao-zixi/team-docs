@@ -161,19 +161,19 @@ function accessResponse(db: AppContext['db'], visibility: string, table: 'space_
 }
 
 export function registerContentRoutes(app: FastifyInstance, { db }: AppContext): void {
-  app.get('/teams/:teamId/spaces', { preValidation: validateParams(TeamParamsSchema) }, async (request) => {
+  app.get('/teams/:teamId/spaces', { config: { agentAccess: { scope: 'read', operation: 'space.read', teamParam: 'teamId', allowSpaceBound: true } }, preValidation: validateParams(TeamParamsSchema) }, async (request) => {
     const { teamId } = request.params as Params;
     const user = actor(db, request);
     requireTeamRole(db, user.id, teamId!);
     const rows = db.prepare('SELECT id,team_id,name,description,visibility FROM spaces WHERE team_id=? ORDER BY name,id').all(teamId) as unknown as SpaceRow[];
-    const spaces = rows.flatMap((row) => {
+    const spaces = rows.filter((row) => !request.agentPrincipal?.spaceId || row.id === request.agentPrincipal.spaceId).flatMap((row) => {
       const access = getSpaceAccess(db, user.id, row.id);
       return access?.canRead ? [toSpace(row, access)] : [];
     });
     return { spaces: spaces.slice(0, 100) };
   });
 
-  app.post('/teams/:teamId/spaces', { preValidation: [validateParams(TeamParamsSchema), validateBody(CreateSpaceSchema)] }, async (request, reply) => {
+  app.post('/teams/:teamId/spaces', { config: { agentAccess: { scope: 'manage', operation: 'team.manage', teamParam: 'teamId' } }, preValidation: [validateParams(TeamParamsSchema), validateBody(CreateSpaceSchema)] }, async (request, reply) => {
     const { teamId } = request.params as Params;
     const input = request.body as z.infer<typeof CreateSpaceSchema>;
     const user = actor(db, request);
@@ -193,7 +193,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return reply.code(201).send({ space: toSpace(row, getSpaceAccess(db, user.id, id)!) });
   });
 
-  app.patch('/spaces/:spaceId', { preValidation: [validateParams(SpaceParamsSchema), validateBody(UpdateSpaceSchema)] }, async (request) => {
+  app.patch('/spaces/:spaceId', { config: { agentAccess: { scope: 'manage', operation: 'space.manage', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: [validateParams(SpaceParamsSchema), validateBody(UpdateSpaceSchema)] }, async (request) => {
     const { spaceId } = request.params as Params;
     const input = request.body as z.infer<typeof UpdateSpaceSchema>;
     const user = actor(db, request);
@@ -208,7 +208,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { space: toSpace(getSpace(db, spaceId!)!, getSpaceAccess(db, user.id, spaceId!)!) };
   });
 
-  app.delete('/spaces/:spaceId', { preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
+  app.delete('/spaces/:spaceId', { config: { agentAccess: { scope: 'manage', operation: 'space.manage', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
     const { spaceId } = request.params as Params;
     const user = actor(db, request);
     const row = getSpace(db, spaceId!);
@@ -218,12 +218,13 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     if (db.prepare('SELECT 1 FROM documents WHERE space_id=? LIMIT 1').get(spaceId)) throw conflict('空间中仍有文档，无法删除。');
     transaction(db, () => {
       audit(db, row.team_id, user.id, 'space.delete', 'space', spaceId!, { name: row.name });
+      db.prepare('UPDATE agent_tokens SET revoked_at=? WHERE space_id=? AND revoked_at IS NULL').run(isoNow(), spaceId);
       db.prepare('DELETE FROM spaces WHERE id=?').run(spaceId);
     });
     return { ok: true };
   });
 
-  app.get('/spaces/:spaceId/access', { preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
+  app.get('/spaces/:spaceId/access', { config: { agentAccess: { scope: 'manage', operation: 'space.manage', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
     const { spaceId } = request.params as Params;
     const user = actor(db, request);
     const { row, access } = visibleSpace(db, user.id, spaceId!);
@@ -231,7 +232,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return accessResponse(db, row.visibility, 'space_grants', 'space_id', spaceId!);
   });
 
-  app.put('/spaces/:spaceId/access', { preValidation: [validateParams(SpaceParamsSchema), validateBody(SpaceAccessSchema)] }, async (request) => {
+  app.put('/spaces/:spaceId/access', { config: { agentAccess: { scope: 'manage', operation: 'space.manage', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: [validateParams(SpaceParamsSchema), validateBody(SpaceAccessSchema)] }, async (request) => {
     const { spaceId } = request.params as Params;
     const input = request.body as z.infer<typeof SpaceAccessSchema>;
     const user = actor(db, request);
@@ -247,7 +248,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return accessResponse(db, input.visibility, 'space_grants', 'space_id', spaceId!);
   });
 
-  app.get('/spaces/:spaceId/documents', { preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
+  app.get('/spaces/:spaceId/documents', { config: { agentAccess: { scope: 'read', operation: 'document.read', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: validateParams(SpaceParamsSchema) }, async (request) => {
     const { spaceId } = request.params as Params;
     const user = actor(db, request);
     visibleSpace(db, user.id, spaceId!);
@@ -260,12 +261,13 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { documents: documents.slice(0, 100) };
   });
 
-  app.post('/spaces/:spaceId/documents', { preValidation: [validateParams(SpaceParamsSchema), validateBody(CreateDocumentSchema)] }, async (request, reply) => {
+  app.post('/spaces/:spaceId/documents', { config: { agentAccess: { scope: 'write', operation: 'document.write', spaceParam: 'spaceId', allowSpaceBound: true } }, preValidation: [validateParams(SpaceParamsSchema), validateBody(CreateDocumentSchema)] }, async (request, reply) => {
     const { spaceId } = request.params as Params;
     const input = request.body as z.infer<typeof CreateDocumentSchema>;
     const user = actor(db, request);
     const { access } = visibleSpace(db, user.id, spaceId!);
     if (!access.canEdit) throw forbidden();
+    if (request.agentPrincipal && (input.visibility === 'restricted' || input.grants.length > 0) && (request.agentPrincipal.scope !== 'manage' || !access.canManage)) throw forbidden('Agent 凭据需要当前 manage 权限才能设置文档访问权限。');
     requireBodyBytes(input.body);
     if (input.visibility === 'restricted' && !access.canManage) throw forbidden();
     if (input.visibility === 'inherit' && input.grants.length) throw badRequest('inherit 文档不能包含单独授权。');
@@ -285,14 +287,14 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return reply.code(201).send({ document: toDocument(db, row, getDocumentAccess(db, user.id, id)!) });
   });
 
-  app.get('/documents/:id', { preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
+  app.get('/documents/:id', { config: { agentAccess: { scope: 'read', operation: 'document.read', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
     const { id } = request.params as Params;
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
     return { document: toDocument(db, row, access) };
   });
 
-  app.patch('/documents/:id', { preValidation: [validateParams(DocumentParamsSchema), validateBody(UpdateDocumentSchema)] }, async (request) => {
+  app.patch('/documents/:id', { config: { agentAccess: { scope: 'write', operation: 'document.write', documentParam: 'id', allowSpaceBound: true } }, preValidation: [validateParams(DocumentParamsSchema), validateBody(UpdateDocumentSchema)] }, async (request) => {
     const { id } = request.params as Params;
     const input = request.body as z.infer<typeof UpdateDocumentSchema>;
     const user = actor(db, request);
@@ -317,7 +319,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { document: toDocument(db, updated, getDocumentAccess(db, user.id, id!)!) };
   });
 
-  app.delete('/documents/:id', { preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
+  app.delete('/documents/:id', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
     const { id } = request.params as Params;
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
@@ -329,7 +331,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { ok: true };
   });
 
-  app.get('/documents/:id/access', { preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
+  app.get('/documents/:id/access', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
     const { id } = request.params as Params;
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
@@ -337,7 +339,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return accessResponse(db, row.visibility, 'document_grants', 'document_id', id!);
   });
 
-  app.put('/documents/:id/access', { preValidation: [validateParams(DocumentParamsSchema), validateBody(DocumentAccessSchema)] }, async (request) => {
+  app.put('/documents/:id/access', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: [validateParams(DocumentParamsSchema), validateBody(DocumentAccessSchema)] }, async (request) => {
     const { id } = request.params as Params;
     const input = request.body as z.infer<typeof DocumentAccessSchema>;
     const user = actor(db, request);
@@ -354,7 +356,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { document: toDocument(db, updated, getDocumentAccess(db, user.id, id!)!) };
   });
 
-  app.get('/documents/:id/revisions', { preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
+  app.get('/documents/:id/revisions', { config: { agentAccess: { scope: 'read', operation: 'document.read', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(DocumentParamsSchema) }, async (request) => {
     const { id } = request.params as Params;
     const user = actor(db, request);
     visibleDocument(db, user.id, id!);
@@ -363,7 +365,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { revisions };
   });
 
-  app.post('/documents/:id/revisions/:revisionId/restore', { preValidation: [validateParams(RevisionParamsSchema), validateBody(RestoreSchema)] }, async (request) => {
+  app.post('/documents/:id/revisions/:revisionId/restore', { config: { agentAccess: { scope: 'manage', operation: 'document.manage', documentParam: 'id', allowSpaceBound: true } }, preValidation: [validateParams(RevisionParamsSchema), validateBody(RestoreSchema)] }, async (request) => {
     const { id, revisionId } = request.params as Params;
     const input = request.body as z.infer<typeof RestoreSchema>;
     const user = actor(db, request);
@@ -389,7 +391,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { document: toDocument(db, updated, getDocumentAccess(db, user.id, id!)!) };
   });
 
-  app.get('/documents/:id/export', { preValidation: validateParams(DocumentParamsSchema) }, async (request, reply) => {
+  app.get('/documents/:id/export', { config: { agentAccess: { scope: 'read', operation: 'document.read', documentParam: 'id', allowSpaceBound: true } }, preValidation: validateParams(DocumentParamsSchema) }, async (request, reply) => {
     const { id } = request.params as Params;
     const user = actor(db, request);
     const { row } = visibleDocument(db, user.id, id!);
@@ -400,7 +402,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
       .send(row.body);
   });
 
-  app.get('/teams/:teamId/search', { preValidation: validateParams(TeamParamsSchema) }, async (request) => {
+  app.get('/teams/:teamId/search', { config: { agentAccess: { scope: 'read', operation: 'document.read', teamParam: 'teamId', allowSpaceBound: true } }, preValidation: validateParams(TeamParamsSchema) }, async (request) => {
     const { teamId } = request.params as Params;
     const user = actor(db, request);
     requireTeamRole(db, user.id, teamId!);
@@ -411,7 +413,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const matches: DocumentSummary[] = [];
     for (const id of ids) {
       const access = getDocumentAccess(db, user.id, id);
-      if (!access?.canRead) continue;
+      if (!access?.canRead || (request.agentPrincipal?.spaceId && access.spaceId !== request.agentPrincipal.spaceId)) continue;
       const row = getDocument(db, id);
       if (!row) continue;
       if (`${row.title}\n${row.body}`.toLocaleLowerCase().includes(needle)) matches.push(toSummary(row, access));
@@ -419,7 +421,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     return { documents: matches.slice(0, 100) };
   });
 
-  app.get('/teams/:teamId/audit', { preValidation: validateParams(TeamParamsSchema) }, async (request) => {
+  app.get('/teams/:teamId/audit', { config: { agentAccess: { scope: 'manage', operation: 'audit.read', teamParam: 'teamId' } }, preValidation: validateParams(TeamParamsSchema) }, async (request) => {
     const { teamId } = request.params as Params;
     const user = actor(db, request);
     const role = requireTeamRole(db, user.id, teamId!);

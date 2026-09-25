@@ -109,6 +109,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.patch('/teams/:teamId', {
+    config: { agentAccess: { scope: 'manage', operation: 'team.manage', teamParam: 'teamId' } },
     preValidation: [validateParams(IdParams), validateBody(TeamNameBody)],
   }, async (request) => {
     const userId = requireUserId(db, request);
@@ -123,6 +124,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.get('/teams/:teamId/members', {
+    config: { agentAccess: { scope: 'manage', operation: 'member.read', teamParam: 'teamId' } },
     preValidation: validateParams(IdParams),
   }, async (request) => {
     const userId = requireUserId(db, request);
@@ -136,6 +138,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.patch('/teams/:teamId/members/:userId', {
+    config: { agentAccess: { scope: 'manage', operation: 'member.manage', teamParam: 'teamId' } },
     preValidation: [validateParams(MemberParams), validateBody(MemberRoleBody)],
   }, async (request) => {
     const actorId = requireUserId(db, request);
@@ -159,6 +162,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.delete('/teams/:teamId/members/:userId', {
+    config: { agentAccess: { scope: 'manage', operation: 'member.manage', teamParam: 'teamId' } },
     preValidation: validateParams(MemberParams),
   }, async (request) => {
     const actorId = requireUserId(db, request);
@@ -173,6 +177,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
       clearMemberAccess(db, teamId, targetId);
       db.prepare('DELETE FROM invitations WHERE team_id=? AND normalized_email=? AND used_at IS NULL')
         .run(teamId, target.normalized_email);
+      db.prepare('UPDATE agent_tokens SET revoked_at=? WHERE team_id=? AND user_id=? AND revoked_at IS NULL').run(isoNow(), teamId, targetId);
       db.prepare('DELETE FROM sessions WHERE user_id=?').run(targetId);
       db.prepare('DELETE FROM members WHERE team_id=? AND user_id=?').run(teamId, targetId);
       writeAudit(db, teamId, actorId, 'member.remove', 'user', targetId);
@@ -181,6 +186,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.get('/teams/:teamId/invitations', {
+    config: { agentAccess: { scope: 'manage', operation: 'invite.read', teamParam: 'teamId' } },
     preValidation: validateParams(IdParams),
   }, async (request) => {
     const userId = requireUserId(db, request);
@@ -193,6 +199,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.post('/teams/:teamId/invitations', {
+    config: { agentAccess: { scope: 'manage', operation: 'invite.manage', teamParam: 'teamId' } },
     preValidation: [validateParams(IdParams), validateBody(InviteBody)],
   }, async (request, reply) => {
     const actorId = requireUserId(db, request);
@@ -224,6 +231,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
   });
 
   app.delete('/teams/:teamId/invitations/:invitationId', {
+    config: { agentAccess: { scope: 'manage', operation: 'invite.manage', teamParam: 'teamId' } },
     preValidation: validateParams(InvitationParams),
   }, async (request) => {
     const actorId = requireUserId(db, request);

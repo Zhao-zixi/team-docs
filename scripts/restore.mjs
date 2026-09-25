@@ -75,6 +75,12 @@ try {
   try {
     const tables = new Set(restoredDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
     if (tables.has('sessions')) restoredDb.exec('DELETE FROM sessions');
+    if (tables.has('agent_tokens')) {
+      const columns = new Set(restoredDb.prepare('PRAGMA table_info(agent_tokens)').all().map((row) => row.name));
+      if (columns.has('revoked_at')) {
+        restoredDb.prepare('UPDATE agent_tokens SET revoked_at = ? WHERE revoked_at IS NULL').run(new Date().toISOString());
+      }
+    }
     if (tables.has('invitations')) {
       const columns = new Set(restoredDb.prepare('PRAGMA table_info(invitations)').all().map((row) => row.name));
       if (columns.has('used_at')) {

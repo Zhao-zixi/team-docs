@@ -1,6 +1,6 @@
 {
   "name": "teamshelf",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "知屿 TeamShelf 团队文档库",
   "type": "module",
@@ -20,13 +20,17 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "test:e2e": "playwright test",
     "test:ops": "node --test tests/ops/ops.test.mjs",
-    "dev:client": "vite --host 0.0.0.0"
+    "dev:client": "vite --host 0.0.0.0",
+    "mcp:stdio": "node dist/mcp/stdio.js"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
     "@fastify/helmet": "13.1.1",
     "@fastify/rate-limit": "11.2.0",
     "@fastify/static": "10.1.4",
+    "@modelcontextprotocol/client": "2.1.0",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.1.0",
     "@tiptap/extension-table": "3.31.3",
     "@tiptap/extension-table-cell": "3.31.3",
     "@tiptap/extension-table-header": "3.31.3",

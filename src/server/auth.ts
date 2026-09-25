@@ -73,6 +73,8 @@ export function createSessionAfterPasswordCheck(db: Db, userId: string, verified
 }
 
 export function requireUserId(db: Db, request: FastifyRequest): string {
+  const principal = request.agentPrincipal;
+  if (principal) return principal.userId;
   const token = cookieToken(request);
   if (!token) throw unauthorized();
   const row = db.prepare('SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?')
@@ -164,6 +166,7 @@ export function registerAuthRoutes(app: FastifyInstance, { db, config }: AuthOpt
       if (!latest || latest.password_hash !== user.password_hash) throw conflict('密码已在其他请求中更改，请重新登录。');
       db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(nextHash, userId);
       db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId);
+      db.prepare('UPDATE agent_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(isoNow(), userId);
     });
     clearSessionCookie(reply, config);
     return { ok: true };
