@@ -21,7 +21,8 @@
     "test:e2e": "playwright test",
     "test:ops": "node --test tests/ops/ops.test.mjs",
     "dev:client": "vite --host 0.0.0.0",
-    "mcp:stdio": "node dist/mcp/stdio.js"
+    "mcp:stdio": "node dist/mcp/stdio.js",
+    "test:stdio:production": "npm run build && vitest run tests/mcp/stdio-teamshelf.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

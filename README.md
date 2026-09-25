@@ -23,6 +23,7 @@ npm run dev:client
 npm run typecheck
 npm test
 npm run build
+npm run test:stdio:production
 npm run test:e2e
 ```
 
@@ -48,3 +49,5 @@ Docker CLI 不在本开发环境中，镜像构建、Compose 启动和 NAS 实�
 ## 设计和接口
 
 架构、API 与安全验证目标见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)、[`docs/API.md`](docs/API.md)、[`docs/TESTING.md`](docs/TESTING.md)。
+
+TeamShelf 0.2.0 同时提供受限的自定义 PAT 与官方 MCP HTTP、stdio 桥接。PAT 不是 OAuth 登录；使用方法、工具范围、scope 和安全说明见 [`docs/MCP.md`](docs/MCP.md)。REST 分页及固定 Bearer 路由规则见 [`docs/API.md`](docs/API.md)。

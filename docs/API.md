@@ -112,3 +112,11 @@ interface Document extends DocumentSummary {
 ## 统一错误
 
 状态码至少包括：400 输入/跨团队 grant 无效，401 未认证，403 缺失 CSRF/非法 mutation，404 无权或不存在资源，409 版本冲突/重复邀请/空间非空/状态冲突，429 限速。错误消息不得包含无权资源的标题、正文、作者或存在性信息。所有失败 mutation 必须无副作用。
+
+## Agent 与 MCP 分页
+
+MCP 通过固定 `/mcp` endpoint 和 `Authorization: Bearer <PAT>` 连接。MCP 不接受 session cookie；Bearer 与 cookie 混合请求拒绝。PAT 的 team、space、scope 与调用人的当前团队角色、ACL 每次重新验证。管理凭据的 REST 路由只接受浏览器 session + CSRF。所有未显式标记的 REST 路由默认拒绝 Bearer。
+
+以下列表 REST 路由支持 `offset`（默认 `0`，非负整数）与 `limit`（默认 `100`，范围 1–100），并在授权过滤后返回具体列表与 `{hasMore,nextOffset}`。适用路由：`GET /teams/:teamId/spaces`、`GET /spaces/:spaceId/documents`、`GET /teams/:teamId/search`、`GET /documents/:id/revisions`、`GET /teams/:teamId/members`、`GET /teams/:teamId/invitations`、`GET /teams/:teamId/audit`。有下一页时 `nextOffset` 为下一页起点；无下一页为 `null`。Bearer 默认页大小100，调用方可继续翻页。Cookie 客户端未传分页时保持既有行为：空间/文档/搜索/审计仍为原本最多100条，成员/邀请/历史仍返回原全量列表。带分页参数的 cookie 请求也按参数分页。
+
+搜索接受可选 `spaceId`。服务端先验证该空间属于路径中的团队并且当前用户可读；单空间 PAT 只能指定其绑定空间。空间过滤先于文档 ACL 过滤、全文匹配与分页，跨团队或不满足绑定的空间返回 404。空间 PAT 未指定 `spaceId` 时自动仅搜索绑定空间。
