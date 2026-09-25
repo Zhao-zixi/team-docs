@@ -27,6 +27,11 @@ npm run test:stdio:production
 npm run test:e2e
 ```
 
+
+
+
+`npm test` 运行源码级 Vitest 与运维脚本测试；若没有构建产物，它会跳过依赖 `dist/mcp/stdio.js` 的生产桥集成用例。要验证该桥，请运行 `npm run test:stdio:production`：此命令先从当前源码构建，再执行真实 stdio→HTTP 测试。
+
 ## NAS 部署
 
 准备 Docker Compose v2。若 NAS 没有 Node/npm，可在项目目录用 Docker 生成本地 `.env`，随机口令只写入文件，不显示在终端：
