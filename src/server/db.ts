@@ -95,7 +95,10 @@ export function openDatabase(dataDir: string): Db {
       created_by TEXT NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      used_at TEXT
+      used_at TEXT,
+      delivery_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (delivery_status IN ('not_sent','sending','sent','failed')),
+      last_sent_at TEXT,
+      send_generation INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS invitations_team_idx ON invitations(team_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS audit_events (
@@ -112,7 +115,7 @@ export function openDatabase(dataDir: string): Db {
 
   `);
   const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (currentVersion > 2) throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);
+  if (currentVersion > 3) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
   if (currentVersion < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tokens (
@@ -134,6 +137,31 @@ export function openDatabase(dataDir: string): Db {
       CREATE INDEX IF NOT EXISTS agent_tokens_space_idx ON agent_tokens(space_id);
       PRAGMA user_version = 2;
     `);
+  }
+  if (currentVersion < 3) {
+    transaction(db, () => {
+      const invitationColumns = new Set((db.prepare('PRAGMA table_info(invitations)').all() as Array<{ name: string }>).map((column) => column.name));
+      if (!invitationColumns.has('delivery_status')) db.exec("ALTER TABLE invitations ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'not_sent'");
+      if (!invitationColumns.has('last_sent_at')) db.exec('ALTER TABLE invitations ADD COLUMN last_sent_at TEXT');
+      if (!invitationColumns.has('send_generation')) db.exec('ALTER TABLE invitations ADD COLUMN send_generation INTEGER NOT NULL DEFAULT 0');
+      db.exec([
+        "CREATE TABLE IF NOT EXISTS mail_settings (",
+        "  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,",
+        "  host TEXT NOT NULL,",
+        "  port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),",
+        "  security TEXT NOT NULL CHECK (security IN ('tls','starttls')),",
+        "  username TEXT NOT NULL,",
+        "  from_email TEXT NOT NULL,",
+        "  from_name TEXT NOT NULL,",
+        "  password_ciphertext TEXT NOT NULL,",
+        "  password_iv TEXT NOT NULL,",
+        "  password_tag TEXT NOT NULL,",
+        "  created_at TEXT NOT NULL,",
+        "  updated_at TEXT NOT NULL",
+        ");"
+      ].join('\n'));
+      db.exec('PRAGMA user_version = 3');
+    });
   }
   return db;
 }

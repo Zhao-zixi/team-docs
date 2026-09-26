@@ -93,19 +93,19 @@ function bearer(token: string, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELET
 }
 
 describe('Agent credentials and REST bearer policy', () => {
-  it('migrates a v1 database idempotently without changing existing data', async () => {
+  it('migrates a v1 database to the current schema idempotently without changing existing data', async () => {
     const migrationDir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-v1-'));
     const first = openDatabase(migrationDir);
     first.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run('team-migration', 'Preserve', isoNow());
     first.exec('DROP TABLE agent_tokens; PRAGMA user_version=1;');
     first.close();
     const migrated = openDatabase(migrationDir);
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2);
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3);
     expect(migrated.prepare("SELECT name FROM teams WHERE id='team-migration'").get()).toEqual({ name: 'Preserve' });
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_tokens'").get()).toBeTruthy();
     migrated.close();
     const twice = openDatabase(migrationDir);
-    expect((twice.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2);
+    expect((twice.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3);
     twice.close();
     await rm(migrationDir, { recursive: true, force: true });
   });

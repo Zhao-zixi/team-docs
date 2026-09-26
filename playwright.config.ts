@@ -20,6 +20,6 @@ export default defineConfig({
     url: "http://127.0.0.1:4187/api/health",
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { ...process.env, PORT: "4187", APP_ORIGIN: "http://127.0.0.1:4187", SETUP_TOKEN: setupToken, DATA_DIR: dataDir, COOKIE_SECURE: "false", NODE_ENV: "production" },
+    env: { ...process.env, PORT: "4187", APP_ORIGIN: "http://127.0.0.1:4187", SETUP_TOKEN: setupToken, DATA_DIR: dataDir, COOKIE_SECURE: "false", NODE_ENV: "production", NODE_EXTRA_CA_CERTS: path.resolve("tests/fixtures/mail-smtp-test-ca.pem") },
   },
 });
