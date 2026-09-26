@@ -5,21 +5,21 @@ import type { AppConfig } from './config.js';
 import type { Db } from './db.js';
 import { transaction } from './db.js';
 import { conflict, forbidden, unauthorized } from './errors.js';
-import { expiresInDays, hashPassword, hashToken, isoNow, newToken, safeSecretEqual, verifyPassword } from './security.js';
+import { expiresInDays, hashPassword, hashToken, isoNow, newToken, safeSecretEqual, verifyPassword, isStrongNewPassword, isPasswordLength } from './security.js';
 import { validateBody } from './validation.js';
 
 const SESSION_COOKIE = 'teamshelf_session';
 export const SESSION_TTL_DAYS = 7;
 const EmailSchema = z.string().trim().email().max(254);
 const NameSchema = z.string().trim().min(1).max(80);
-const PasswordSchema = z.string().min(12).max(128);
+const PasswordSchema = z.string().refine(isStrongNewPassword, "请设置至少15位且不常见的新密码。");
 const SetupBodySchema = z.object({
   token: z.string().min(1).max(256), name: NameSchema, email: EmailSchema,
   password: PasswordSchema, teamName: NameSchema,
 }).strict();
-const LoginBodySchema = z.object({ email: EmailSchema, password: z.string().min(1).max(128) }).strict();
+const LoginBodySchema = z.object({ email: EmailSchema, password: z.string().refine((value) => isPasswordLength(value, 1), '密码格式无效。') }).strict();
 const PasswordChangeBodySchema = z.object({
-  currentPassword: z.string().min(1).max(128), newPassword: PasswordSchema,
+  currentPassword: z.string().refine((value) => isPasswordLength(value, 1), '密码格式无效。'), newPassword: PasswordSchema,
 }).strict();
 
 interface AuthOptions {

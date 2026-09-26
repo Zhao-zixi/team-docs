@@ -72,6 +72,10 @@ describe('setup and session authentication', () => {
     expect(bad.statusCode).toBe(403);
     expect((await app.inject({ method: 'GET', url: '/api/setup' })).json()).toEqual({ needsSetup: true });
 
+    const weak = await setup({ password: 'password123456789' });
+    expect(weak.statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/setup' })).json()).toEqual({ needsSetup: true });
+
     const responses = await Promise.all([setup(), setup()]);
     expect(responses.map((response) => response.statusCode).sort()).toEqual([201, 409]);
     expect(db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 1 });

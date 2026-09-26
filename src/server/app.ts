@@ -16,12 +16,15 @@ import { HttpError, unauthorized } from './errors.js';
 import { authenticateAgentToken, authorizeAgentRoute } from './agentAuth.js';
 import { registerAgentCredentialRoutes } from './agentTokens.js';
 import { createTeamShelfMcpHandler } from './mcp.js';
+import { registerMailRoutes } from './mail.js';
+import type { MailSender } from './mailer.js';
 
 export interface CreateAppOptions {
   config?: AppConfig;
   db?: Db;
   logger?: boolean;
   serveClient?: boolean;
+  mailSender?: MailSender;
 }
 
 export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fastify> {
@@ -125,11 +128,12 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
   });
   app.get('/api/health', async () => ({ ok: true }));
   app.register(async (api) => {
-    const context = { db, config };
+    const context = { db, config, mailSender: options.mailSender };
     registerAuthRoutes(api, context);
     registerTeamRoutes(api, context);
     registerContentRoutes(api, context);
     registerAgentCredentialRoutes(api, context);
+    registerMailRoutes(api, context);
   }, { prefix: '/api' });
   app.route({ method: ['GET', 'POST', 'DELETE'], url: '/mcp', handler: async (request, reply) => {
     const host = request.headers.host;

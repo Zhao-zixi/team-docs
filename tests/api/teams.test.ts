@@ -189,4 +189,19 @@ describe('teams, membership, and invitations', () => {
     expect(retry.statusCode).toBe(200);
     expect((db.prepare('SELECT COUNT(*) AS count FROM users WHERE normalized_email=?').get('racing@example.com') as { count: number }).count).toBe(1);
   });
+
+  it('preserves legacy existing-account passwords while requiring a strong password for new invited accounts', async () => {
+    const legacyPassword = '😀'.repeat(6);
+    const legacyHash = await hashPassword(legacyPassword);
+    const existing = await addUser('legacy@example.com', 'Legacy', undefined, teamId, legacyHash);
+    const invite = await createInvite('legacy@example.com', 'viewer');
+    const accepted = await app.inject({ method: 'POST', url: '/api/invitations/' + invite.json().token + '/accept', headers, payload: { password: legacyPassword } });
+    expect(accepted.statusCode).toBe(200);
+    expect((db.prepare('SELECT password_hash FROM users WHERE id=?').get(existing.id) as { password_hash: string }).password_hash).toBe(legacyHash);
+
+    const weakInvite = await createInvite('weak-new@example.com', 'viewer');
+    const weak = await app.inject({ method: 'POST', url: '/api/invitations/' + weakInvite.json().token + '/accept', headers, payload: { name: 'Weak New User', password: 'password123456789' } });
+    expect(weak.statusCode).toBe(403);
+    expect(db.prepare('SELECT 1 FROM users WHERE normalized_email=?').get('weak-new@example.com')).toBeUndefined();
+  });
 });

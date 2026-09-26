@@ -6,7 +6,7 @@ import type { Db } from './db.js';
 import { transaction } from './db.js';
 import { requireUserId, createSession, setSessionCookie } from './auth.js';
 import { conflict, forbidden, notFound, unauthorized } from './errors.js';
-import { expiresInDays, hashPassword, hashToken, isoNow, newToken, verifyPassword } from './security.js';
+import { expiresInDays, hashPassword, hashToken, isoNow, newToken, verifyPassword, isStrongNewPassword, isPasswordLength } from './security.js';
 import { validateBody, validateParams } from './validation.js';
 import { hasExplicitPage, paginate, parsePage } from './pagination.js';
 
@@ -19,7 +19,7 @@ const InvitationTokenParams = z.object({ token: z.string().min(32).max(256) }).s
 const TeamNameBody = z.object({ name: z.string().trim().min(1).max(100) }).strict();
 const MemberRoleBody = z.object({ role: z.enum(['admin', 'editor', 'viewer']) }).strict();
 const InviteBody = z.object({ email: z.string().trim().email().max(254), role: z.enum(['admin', 'editor', 'viewer']) }).strict();
-const AcceptInvitationBody = z.object({ name: z.string().trim().min(1).max(80).optional(), password: z.string().min(12).max(128) }).strict();
+const AcceptInvitationBody = z.object({ name: z.string().trim().min(1).max(80).optional(), password: z.string().refine((value) => isPasswordLength(value, 1), '密码格式无效。') }).strict();
 
 interface TeamMemberRow {
   user_id: string;
@@ -37,14 +37,28 @@ interface InvitationRow {
   email: string;
   normalized_email: string;
   role: InvitationRole;
+  created_by: string;
   token_hash: string;
   expires_at: string;
   used_at: string | null;
 }
 
+function creatorCanIssueInvite(db: Db, teamId: string, createdBy: string, role: InvitationRole): boolean {
+  const creator = teamRole(db, teamId, createdBy);
+  return role === 'admin' ? creator === 'owner' : creator === 'owner' || creator === 'admin';
+}
+
 function teamRole(db: Db, teamId: string, userId: string): Role | undefined {
   const result = db.prepare('SELECT role FROM members WHERE team_id=? AND user_id=?').get(teamId, userId) as { role: Role } | undefined;
   return result?.role;
+}
+
+function removeStalePendingInvites(db: Db, teamId: string, email?: string): void {
+  const sql = "SELECT id,role,created_by,expires_at FROM invitations WHERE team_id=? AND used_at IS NULL" + (email ? " AND normalized_email=?" : "");
+  const rows = db.prepare(sql).all(...(email ? [teamId, email] : [teamId])) as Array<{id:string;role:InvitationRole;created_by:string;expires_at:string}>;
+  for (const row of rows) {
+    if (row.expires_at <= isoNow() || !creatorCanIssueInvite(db, teamId, row.created_by, row.role)) db.prepare("DELETE FROM invitations WHERE id=? AND used_at IS NULL").run(row.id);
+  }
 }
 
 function requireTeamMember(db: Db, teamId: string, userId: string): Role {
@@ -158,6 +172,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
       assertCanManageRole(actorRole, target.role, nextRole);
       if (targetId === actorId) throw forbidden('不能修改自己的团队角色。');
       db.prepare('UPDATE members SET role=? WHERE team_id=? AND user_id=?').run(nextRole, teamId, targetId);
+      db.prepare('DELETE FROM invitations WHERE team_id=? AND created_by=? AND used_at IS NULL').run(teamId, targetId);
       clearMemberAccess(db, teamId, targetId);
       db.prepare('DELETE FROM invitations WHERE team_id=? AND normalized_email=? AND used_at IS NULL')
         .run(teamId, target.normalized_email);
@@ -197,11 +212,12 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     const userId = requireUserId(db, request);
     const { teamId } = request.params as z.infer<typeof IdParams>;
     requireManager(db, teamId, userId);
+    removeStalePendingInvites(db, teamId);
     const page = parsePage(request.query);
-    const invitations = db.prepare(`SELECT id,email,role,created_at,expires_at FROM invitations
+    const invitations = db.prepare(`SELECT id,email,role,created_at,expires_at,delivery_status,last_sent_at FROM invitations
       WHERE team_id=? AND used_at IS NULL AND expires_at>? ORDER BY created_at DESC`).all(teamId, isoNow()) as
-      Array<{ id: string; email: string; role: InvitationRole; created_at: string; expires_at: string }>;
-    const entries = invitations.map((entry) => ({ id: entry.id, email: entry.email, role: entry.role, createdAt: entry.created_at, expiresAt: entry.expires_at }));
+      Array<{ id: string; email: string; role: InvitationRole; created_at: string; expires_at: string; delivery_status: 'not_sent'|'sending'|'sent'|'failed'; last_sent_at: string|null }>;
+    const entries = invitations.map((entry) => ({ id: entry.id, email: entry.email, role: entry.role, createdAt: entry.created_at, expiresAt: entry.expires_at, deliveryStatus: entry.delivery_status, lastSentAt: entry.last_sent_at }));
     if (!request.agentPrincipal && !hasExplicitPage(request.query)) return { invitations: entries };
     const pageResult = paginate(entries, page);
     return { invitations: pageResult.entries, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
@@ -220,6 +236,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     const invitation = transaction(db, () => {
       const actorRole = requireManager(db, teamId, actorId);
       if (body.role === 'admin' && actorRole !== 'owner') throw forbidden('只有所有者可以邀请管理员。');
+      removeStalePendingInvites(db, teamId, email);
       if (db.prepare('SELECT 1 FROM users WHERE normalized_email=?').get(email) &&
           db.prepare('SELECT 1 FROM members m JOIN users u ON u.id=m.user_id WHERE m.team_id=? AND u.normalized_email=?').get(teamId, email)) {
         throw conflict('该用户已经是团队成员。');
@@ -259,10 +276,10 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     config: { rateLimit: { max: 20, timeWindow: 60_000 } },
   }, async (request) => {
     const { token } = request.params as z.infer<typeof InvitationTokenParams>;
-    const invite = db.prepare(`SELECT i.email,i.role,i.expires_at,t.name AS team_name FROM invitations i
+    const invite = db.prepare(`SELECT i.team_id,i.email,i.role,i.created_by,i.expires_at,t.name AS team_name FROM invitations i
       JOIN teams t ON t.id=i.team_id WHERE i.token_hash=? AND i.used_at IS NULL AND i.expires_at>?`)
-      .get(hashToken(token), isoNow()) as { email: string; role: InvitationRole; expires_at: string; team_name: string } | undefined;
-    if (!invite) throw notFound();
+      .get(hashToken(token), isoNow()) as { team_id: string; email: string; role: InvitationRole; created_by: string; expires_at: string; team_name: string } | undefined;
+    if (!invite || !creatorCanIssueInvite(db, invite.team_id, invite.created_by, invite.role)) throw notFound();
     return { teamName: invite.team_name, email: invite.email, role: invite.role, expiresAt: invite.expires_at };
   });
 
@@ -274,7 +291,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
     const body = request.body as z.infer<typeof AcceptInvitationBody>;
     const tokenHash = hashToken(token);
     const now = isoNow();
-    const currentInvite = db.prepare(`SELECT i.id,i.team_id,i.email,i.normalized_email,i.role,i.expires_at,i.used_at,t.name AS team_name
+    const currentInvite = db.prepare(`SELECT i.id,i.team_id,i.email,i.normalized_email,i.role,i.created_by,i.expires_at,i.used_at,t.name AS team_name
       FROM invitations i JOIN teams t ON t.id=i.team_id WHERE i.token_hash=? AND i.used_at IS NULL AND i.expires_at>?`)
       .get(tokenHash, now) as InvitationRow | undefined;
     if (!currentInvite) throw notFound();
@@ -286,13 +303,15 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
       if (!(await verifyPassword(body.password, existingUser.password_hash))) throw forbidden('现有账号密码不正确。');
     } else {
       if (!body.name) throw forbidden('新账号需要提供姓名。');
+      if (!isStrongNewPassword(body.password)) throw forbidden('请设置至少15位且不常见的新密码。');
       newPasswordHash = await hashPassword(body.password);
     }
 
     const result = transaction(db, () => {
-      const invite = db.prepare(`SELECT id,team_id,email,normalized_email,role,token_hash,expires_at,used_at
+      const invite = db.prepare(`SELECT id,team_id,email,normalized_email,role,created_by,token_hash,expires_at,used_at
         FROM invitations WHERE token_hash=?`).get(tokenHash) as InvitationRow | undefined;
       if (!invite || invite.used_at || invite.expires_at <= isoNow()) throw conflict('邀请已使用或已过期。');
+      if (!creatorCanIssueInvite(db, invite.team_id, invite.created_by, invite.role)) throw notFound();
       const account = db.prepare('SELECT id,email,name,password_hash FROM users WHERE normalized_email=?')
         .get(invite.normalized_email) as { id: string; email: string; name: string; password_hash: string } | undefined;
       let userId: string;
