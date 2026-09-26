@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'status=$?; printf "source-up test failed at line %s (exit %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP" "$BACKUP_DIR"' EXIT
@@ -84,7 +85,7 @@ export PATH="$TMP/bin:$PATH" DOCKER_BIN="$TMP/bin/docker-mock"
 export MOCK_LOG="$TMP/docker.log" MOCK_EVENTS="$TMP/events" MOCK_BACKUP_DIR="$BACKUP_DIR"
 : >"$MOCK_LOG"; : >"$MOCK_EVENTS"
 
-run_case() { (cd "$TEST_ROOT" && "$TEST_ROOT/deploy/source-up.sh" --project teamshelf-mock --volume teamshelf-mock-data --backup-dir "$BACKUP_DIR" --origin http://localhost:8080 "$@"); }
+run_case() { (cd "$TEST_ROOT" && bash "$TEST_ROOT/deploy/source-up.sh" --project teamshelf-mock --volume teamshelf-mock-data --backup-dir "$BACKUP_DIR" --origin http://localhost:8080 "$@"); }
 
 # Missing volume without explicit initialization must fail before build/stop/up.
 export MOCK_OLD_CONTAINER=0 MOCK_VOLUME_EXISTS=0 MOCK_DB_EXISTS=0 MOCK_BACKUP_FAIL=0
