@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">知屿 TeamShelf 浏览器、Agent 与权限架构</title>
+  <desc id="desc">团队成员和 AI Agent 通过不同认证进入 TeamShelf；MCP 与网页请求共用服务端授权边界，再访问 SQLite 命名卷和持久备份。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbfaf6"/>
+      <stop offset="1" stop-color="#f1f5f1"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#357761"/>
+      <stop offset="1" stop-color="#215b4c"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#739183"/>
+    </marker>
+    <marker id="arrowGold" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#c78b45"/>
+    </marker>
+    <style>
+      text { font-family: "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+      .title { fill:#263e34; font-size:32px; font-weight:700; }
+      .subtitle { fill:#718077; font-size:15px; }
+      .card { fill:#fff; stroke:#dfe8e1; stroke-width:1.5; }
+      .cardTitle { fill:#304a3e; font-size:19px; font-weight:700; }
+      .label { fill:#52685d; font-size:14px; }
+      .small { fill:#819087; font-size:12px; }
+      .tag { fill:#eaf2ed; }
+      .tagText { fill:#3a705b; font-size:12px; font-weight:600; }
+      .line { fill:none; stroke:#779386; stroke-width:2.5; marker-end:url(#arrow); }
+      .lineGold { fill:none; stroke:#c78b45; stroke-width:2.5; marker-end:url(#arrowGold); }
+    </style>
+  </defs>
+
+  <rect width="1440" height="820" rx="24" fill="url(#bg)"/>
+  <circle cx="1335" cy="90" r="105" fill="#e8efe8" opacity=".65"/>
+  <circle cx="112" cy="722" r="120" fill="#f4eadb" opacity=".55"/>
+
+  <text x="72" y="76" class="title">一套权限边界，服务浏览器与 Agent</text>
+  <text x="72" y="108" class="subtitle">知屿 TeamShelf · 同源 API · 每次请求由服务端检查当前成员身份与资源授权</text>
+
+  <!-- Human/browser -->
+  <rect x="70" y="176" width="285" height="208" rx="18" class="card"/>
+  <rect x="94" y="201" width="46" height="46" rx="13" fill="#eaf3ed"/>
+  <path d="M105 217h24v17h-24z M108 212h18" fill="none" stroke="#357761" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="154" y="220" class="cardTitle">团队成员</text>
+  <text x="96" y="278" class="label">浏览器 · 网页界面</text>
+  <rect x="96" y="296" width="198" height="29" rx="14" class="tag"/>
+  <text x="112" y="315" class="tagText">会话 Cookie + CSRF</text>
+  <text x="96" y="354" class="small">团队与资源权限按当前账号生效</text>
+
+  <!-- Agent -->
+  <rect x="70" y="470" width="285" height="220" rx="18" class="card"/>
+  <rect x="94" y="495" width="46" height="46" rx="13" fill="#fff2df"/>
+  <path d="M108 510h18a6 6 0 0 1 6 6v9h-6v-6h-18v6h-6v-9a6 6 0 0 1 6-6zm2-7a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm14 0a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" fill="#ba7a32"/>
+  <text x="154" y="514" class="cardTitle">AI Agent</text>
+  <text x="96" y="573" class="label">官方 MCP Client / stdio 桥</text>
+  <rect x="96" y="591" width="206" height="29" rx="14" fill="#fff2df"/>
+  <text x="112" y="610" fill="#9b682e" font-size="12" font-weight="600">单独签发的 Bearer PAT</text>
+  <text x="96" y="650" class="small">可限权限等级、有效期与单一知识库</text>
+
+  <!-- TeamShelf boundary -->
+  <rect x="470" y="160" width="575" height="548" rx="24" fill="#f5f8f4" stroke="#cbdacf" stroke-width="2"/>
+  <rect x="496" y="184" width="523" height="72" rx="15" fill="url(#teal)"/>
+  <text x="522" y="216" fill="#fff" font-size="20" font-weight="700">知屿 TeamShelf</text>
+  <text x="522" y="239" fill="#dcebe3" font-size="13">同一服务 · 同一成员目录 · 同一资源授权逻辑</text>
+  <circle cx="976" cy="220" r="17" fill="#ffffff" opacity=".16"/>
+  <path d="M968 220l6 6 11-13" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="770" y="279" width="244" height="92" rx="14" class="card"/>
+  <text x="792" y="309" class="cardTitle" font-size="16">网页 API</text>
+  <text x="792" y="337" class="label">团队、知识库、文档</text>
+  <text x="792" y="357" class="small">Cookie 会话认证</text>
+
+  <rect x="500" y="279" width="244" height="92" rx="14" class="card"/>
+  <text x="522" y="309" class="cardTitle" font-size="16">MCP HTTP /mcp</text>
+  <text x="522" y="337" class="label">工具列表与工具调用</text>
+  <text x="522" y="357" class="small">每次调用重新验证 PAT</text>
+
+  <rect x="500" y="394" width="514" height="81" rx="14" fill="#fff" stroke="#ead8ba" stroke-width="1.5"/>
+  <text x="522" y="423" fill="#805e31" font-size="15" font-weight="700">身份入口分别认证，资源操作统一检查</text>
+  <text x="522" y="450" class="label">MCP 工具转入受保护的应用路由，不使用 Agent 自报身份</text>
+
+  <rect x="500" y="498" width="514" height="170" rx="16" fill="#fff" stroke="#dfe8e1" stroke-width="1.5"/>
+  <text x="522" y="530" class="cardTitle" font-size="16">服务端授权边界</text>
+  <rect x="522" y="548" width="143" height="34" rx="9" class="tag"/>
+  <text x="536" y="570" class="tagText">当前团队角色</text>
+  <text x="674" y="571" fill="#9ca89f" font-size="18">×</text>
+  <rect x="697" y="548" width="126" height="34" rx="9" class="tag"/>
+  <text x="711" y="570" class="tagText">Agent scope</text>
+  <text x="833" y="571" fill="#9ca89f" font-size="18">×</text>
+  <rect x="856" y="548" width="134" height="34" rx="9" class="tag"/>
+  <text x="870" y="570" class="tagText">知识库范围</text>
+  <text x="522" y="612" class="label">再检查对象 ACL 与资源当前状态</text>
+  <text x="522" y="640" class="small">PAT 不能扩大成员权限；撤销、过期或撤权会阻止后续调用</text>
+
+  <!-- Storage -->
+  <rect x="1160" y="240" width="220" height="160" rx="18" class="card"/>
+  <rect x="1191" y="266" width="48" height="46" rx="12" fill="#edf2ef"/>
+  <ellipse cx="1215" cy="276" rx="17" ry="6" fill="#678878"/>
+  <path d="M1198 276v23c0 4 8 7 17 7s17-3 17-7v-23 M1198 287c0 4 8 7 17 7s17-3 17-7" fill="none" stroke="#678878" stroke-width="2"/>
+  <text x="1252" y="284" class="cardTitle" font-size="17">SQLite</text>
+  <text x="1191" y="337" class="label">持久命名卷</text>
+  <text x="1191" y="365" class="small">单实例写入 · NAS 本地存储</text>
+
+  <rect x="1160" y="470" width="220" height="160" rx="18" class="card"/>
+  <rect x="1191" y="496" width="48" height="46" rx="12" fill="#fff2df"/>
+  <path d="M1200 505h29v31h-29z M1206 513h17 M1206 519h17 M1206 525h11" fill="none" stroke="#ba7a32" stroke-width="2" stroke-linecap="round"/>
+  <text x="1252" y="515" class="cardTitle" font-size="17">一致性备份</text>
+  <text x="1191" y="568" class="label">独立持久目录</text>
+  <text x="1191" y="596" class="small">升级前备份 · 操作员决定恢复</text>
+
+  <!-- Flows -->
+  <path d="M355 280 C455 260 690 260 890 279" class="line"/>
+  <text x="392" y="265" class="small">浏览器会话</text>
+  <path d="M355 570 C420 570 430 325 500 325" class="lineGold"/>
+  <text x="401" y="526" fill="#a87739" font-size="12">HTTPS + Bearer PAT</text>
+  <path d="M744 325 C760 325 755 325 770 325" class="line"/>
+  <path d="M890 371 C890 385 850 385 850 394" class="line"/>
+  <path d="M1014 580 C1090 580 1080 320 1160 320" class="line"/>
+  <path d="M1270 400 L1270 470" class="lineGold"/>
+
+  <text x="72" y="758" class="small">Agent 凭据只在签发时显示一次；示意图不包含真实密钥、用户数据或网络字体。</text>
+  <text x="1159" y="758" class="small">数据留在自托管环境</text>
+</svg>
