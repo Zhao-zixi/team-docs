@@ -1,3 +1,4 @@
+name: ${TEAMSHELF_COMPOSE_PROJECT:?Set TEAMSHELF_COMPOSE_PROJECT in the launcher or .env}
 services:
   teamshelf:
     build:
@@ -10,7 +11,7 @@ services:
       NODE_ENV: production
       PORT: "3000"
       APP_ORIGIN: "${APP_ORIGIN:?Set APP_ORIGIN in .env to the exact browser origin}"
-      SETUP_TOKEN: "${SETUP_TOKEN:?Run npm run configure or set a strong one-time token}"
+      SETUP_TOKEN: "${SETUP_TOKEN:?Run the launcher to create a one-time setup token}"
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
       DATA_DIR: /app/data
     volumes:
@@ -25,6 +26,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 volumes:
   teamshelf-data:
+    external: true
+    name: ${TEAMSHELF_DATA_VOLUME:?Set TEAMSHELF_DATA_VOLUME to the exact Docker volume name}
