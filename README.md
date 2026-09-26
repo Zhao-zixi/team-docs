@@ -65,9 +65,13 @@ pwsh -NoProfile -File .\scripts\start-local.ps1
 
 ![TeamShelf 文档访问权限设置界面](docs/images/teamshelf-access-demo.png)
 
-owner/admin 可以查看本团队全部知识库和文档，包括受限内容。管理员角色管理另有边界：只有 owner 可以任命或撤销 admin。普通成员按团队角色和资源授权访问；受限知识库需要知识库授权，受限文档还需要文档授权，文档授权不能绕过所属知识库权限。Agent 凭据也受当前成员权限与凭据范围共同限制，详见[架构与权限](docs/ARCHITECTURE.md)和[Agent / MCP 指南](docs/MCP.md)。
+owner/admin 可以查看本团队全部知识库和文档，包括受限内容。管理员角色管理另有边界：只有 owner 可以任命或撤销 admin。普通成员按团队角色和资源授权访问；受限知识库需要知识库授权，受限文档还需要文档授权，文档授权不能绕过所属知识库权限。Agent 凭据也受当前成员权限与凭据范围共同限制，详见[架构与权限](docs/ARCHITECTURE.md)和[Agent / MCP 指南](docs/MCP.md)。管理员个人邮箱配置、邮件邀请和重发方式见[邮箱与邀请指南](docs/EMAIL.md)。
 
 SQLite 数据默认位于本机 `DATA_DIR` 或 Docker 持久命名卷。不要把活动数据库放在 SMB/NFS 共享目录，也不要同时运行多个写入实例。更新前做好备份；部署脚本在更新过程中创建一致性备份。备份和恢复步骤见[部署指南](docs/DEPLOYMENT.md)。
+
+## 邮箱与邀请
+
+团队管理员可在“邮箱与邀请”中配置自己的 SMTP 发信邮箱，测试邮件只会发送到自己的登录邮箱。成员邀请默认通过邮件发送；也可单独生成手动链接，该操作不会发送邮件或验证邮箱。配置与故障处理见[邮箱与邀请指南](docs/EMAIL.md)。新账号和修改密码要求密码至少 15 个 Unicode 字符。
 
 ## 开发者进阶
 

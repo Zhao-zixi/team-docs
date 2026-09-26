@@ -1,11 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { inviteUrlFromMail, startLocalTlsSmtpSink, type LocalTlsSmtpSink } from "../helpers/local-smtp.mjs";
 test.use({ trace: "off", screenshot: "off" });
 
 const setupToken = "teamshelf-e2e-setup-token-2026-only-for-isolated-tests";
 const adminEmail = "owner-e2e@example.test";
 const adminPassword = "Teamshelf-Test-Password-2026!";
-const viewerPassword = "Viewer-Test-Password-2026!";
+const viewerPassword = "窗边纸船绕过深蓝群岛抵达星河2047";
+let activeMailSink: LocalTlsSmtpSink | undefined;
+test.afterEach(async () => { await activeMailSink?.close(); activeMailSink = undefined; });
 
 async function waitForNewDocumentUrl(page: Page, previousId: string | null): Promise<string> {
   await expect.poll(() => new URL(page.url()).searchParams.get("doc")).not.toBe(previousId);
@@ -14,28 +17,95 @@ async function waitForNewDocumentUrl(page: Page, previousId: string | null): Pro
   return id!;
 }
 
-test("real API flow: setup, edit, ACL, conflict recovery and deep-link refresh", async ({ page, browser }) => {
+test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-link refresh", async ({ page, browser }) => {
+  activeMailSink = await startLocalTlsSmtpSink();
+  const sink = activeMailSink;
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "建立你的知屿" })).toBeVisible();
   await page.getByLabel("初始化口令").fill(setupToken);
   await page.getByLabel("团队名称").fill("E2E 知识团队");
   await page.getByLabel("邮箱").fill(adminEmail);
   await page.getByLabel("你的姓名").fill("E2E 管理员");
+  await expect(page.getByLabel("密码")).toHaveAttribute("maxlength", "256");
+  await page.getByLabel("密码").fill("短密码");
+  await page.getByRole("button", { name: "创建团队空间" }).click();
+  await expect(page.getByRole("alert")).toContainText("新密码需要15–128个Unicode字符");
   await page.getByLabel("密码").fill(adminPassword);
   await page.getByRole("button", { name: "创建团队空间" }).click();
   await expect(page.getByRole("heading", { name: "给团队知识，一个好去处。" })).toBeVisible();
 
+  await page.getByRole("button", { name: "邮箱与邀请" }).click();
+  const mailDialog = page.getByRole("dialog");
+  const smtpHost = mailDialog.getByLabel("SMTP 主机");
+  await smtpHost.fill(sink.host);
+  await mailDialog.getByRole("spinbutton", { name: "端口" }).fill(String(sink.port));
+  await mailDialog.getByLabel("连接加密").selectOption("tls");
+  await mailDialog.getByLabel("SMTP 用户名").fill(sink.username);
+  await mailDialog.getByLabel("发件邮箱").fill("teamshelf-sender@example.test");
+  await mailDialog.getByLabel("发件人名称").fill("TeamShelf E2E");
+  const smtpPassword = mailDialog.getByLabel("SMTP 授权码");
+  await smtpPassword.fill(sink.password);
+  await mailDialog.getByRole("button", { name: "保存邮箱设置" }).click();
+  await expect(mailDialog.getByRole("status")).toContainText("发信邮箱设置已保存");
+  await expect(smtpPassword).toHaveValue("");
+  const storedMailSettings = await page.evaluate(async () => (await (await fetch("/api/mail/settings")).json()));
+  expect(storedMailSettings.configured).toBe(true);
+  expect(storedMailSettings.settings.hasPassword).toBe(true);
+  expect(storedMailSettings.settings).not.toHaveProperty("password");
+  expect(JSON.stringify(storedMailSettings)).not.toContain(sink.password);
+  await smtpHost.fill("changed.smtp.invalid");
+  await expect(smtpPassword).toHaveAttribute("required", "");
+  await expect(mailDialog.getByRole("status").filter({ hasText: "已更改，请重新输入授权码" })).toBeVisible();
+  await smtpHost.fill(sink.host);
+  await expect(smtpPassword).not.toHaveAttribute("required", "");
+  await mailDialog.getByLabel("发件人名称").fill("TeamShelf E2E updated");
+  await mailDialog.getByRole("button", { name: "保存邮箱设置" }).click();
+  await expect(mailDialog.getByRole("status")).toContainText("连接参数不变时留空可保留已存授权码");
+
+  const mailCountBeforeTest = sink.received.length;
+  await mailDialog.getByRole("button", { name: "发送测试邮件" }).click();
+  await expect(mailDialog.getByRole("status")).toContainText("测试邮件已发送至 " + adminEmail);
+  await expect.poll(() => sink.received.length).toBe(mailCountBeforeTest + 1);
+  expect(sink.received.at(-1)?.to).toContain(adminEmail);
+  expect(sink.received.at(-1)?.raw).not.toContain(sink.password);
+  await mailDialog.getByRole("button", { name: "关闭对话框" }).click();
+
+  const viewerEmail = "viewer-e2e@example.test";
   await page.getByRole("button", { name: "团队成员" }).click();
   const membersDialog = page.getByRole("dialog");
-  await membersDialog.getByLabel("受邀邮箱").fill("viewer-e2e@example.test");
+  await membersDialog.getByLabel("受邀邮箱").fill(viewerEmail);
   await membersDialog.getByLabel("邀请角色").selectOption("viewer");
-  await membersDialog.getByRole("button", { name: "发送邀请" }).click();
-  const invitationLink = membersDialog.getByLabel("邀请链接，可选择复制");
-  await expect(invitationLink).toBeVisible();
-  const inviteUrl = await invitationLink.inputValue();
+  const emailInviteResponsePromise = page.waitForResponse(response => response.url().includes("/invitations/email") && response.request().method() === "POST");
+  await membersDialog.getByRole("button", { name: "邮件邀请" }).click();
+  const emailInviteResponse = await emailInviteResponsePromise;
+  const emailInvitePayload = await emailInviteResponse.json();
+  expect(emailInvitePayload).not.toHaveProperty("token");
+  const viewerInviteRow = page.locator(".member-row").filter({ hasText: viewerEmail });
+  await expect(viewerInviteRow).toContainText("邮件已发送");
+  await expect.poll(() => sink.received.filter(mail => mail.to.includes(viewerEmail)).length).toBe(1);
+  const oldInviteUrl = inviteUrlFromMail(sink.received.find(mail => mail.to.includes(viewerEmail))!);
+  const oldInviteToken = new URL(oldInviteUrl).searchParams.get("invite")!;
+  expect(oldInviteToken).toBeTruthy();
+
+  sink.rejectAuth = true;
+  await viewerInviteRow.getByRole("button", { name: "重新发送邮件给 " + viewerEmail }).click();
+  await expect(viewerInviteRow).toContainText("发送失败");
+  const expiredOldInvite = await page.request.get(new URL("/api/invitations/" + encodeURIComponent(oldInviteToken), page.url()).toString());
+  expect(expiredOldInvite.status()).toBe(404);
+
+  sink.rejectAuth = false;
+  await viewerInviteRow.getByRole("button", { name: "重新发送邮件给 " + viewerEmail }).click();
+  await expect(viewerInviteRow).toContainText("邮件已发送");
+  await expect.poll(() => sink.received.filter(mail => mail.to.includes(viewerEmail)).length).toBe(2);
+  const freshInviteUrl = inviteUrlFromMail(sink.received.filter(mail => mail.to.includes(viewerEmail)).at(-1)!);
+  expect(new URL(freshInviteUrl).origin).toBe(new URL(page.url()).origin);
+  expect(freshInviteUrl).not.toBe(oldInviteUrl);
+  const oldInviteStillExpired = await page.request.get(new URL("/api/invitations/" + encodeURIComponent(oldInviteToken), page.url()).toString());
+  expect(oldInviteStillExpired.status()).toBe(404);
+
   const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const viewerPage = await viewerContext.newPage();
-  await viewerPage.goto(inviteUrl);
+  await viewerPage.goto(freshInviteUrl);
   await expect(viewerPage.getByRole("heading", { name: "接受团队邀请" })).toBeVisible();
   await viewerPage.getByLabel("姓名（已有账号可留空）").fill("E2E 阅读者");
   await viewerPage.getByLabel("密码").fill(viewerPassword);
