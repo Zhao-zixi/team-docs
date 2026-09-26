@@ -1,101 +1,108 @@
-# TeamShelf 部署与运维
+# TeamShelf 部署、备份与恢复
 
-TeamShelf 由 Node.js 24 LTS 提供同源 API 和网页，数据保存在 `DATA_DIR/teamshelf.sqlite`。服务按单实例运行，SQLite 文件应放在 NAS 的本地 Docker 命名卷中。不要把数据库放到 SMB/NFS 共享目录，也不要启动多个应用副本。
+TeamShelf 使用 Node.js 24 提供网页与 API，SQLite 数据库位于 DATA_DIR/teamshelf.sqlite。服务按单实例运行。先在[README 运行方式表](../README.md#选择运行方式)中选择本机、源码 Compose 或经过验证的固定 digest 发布；不要让两种 Compose 更新器同时管理同一实例。
 
-GitHub CI/CD、不可变 GHCR digest 与 NAS 自动更新步骤见[CI/CD 与 NAS 部署指南](CICD.md)。
+## Windows 本机
 
-## 本机启动
+需要 Windows PowerShell 7、Node.js 24 LTS 和 npm。在项目目录运行：
 
-需要 Node.js 24 和 npm。在项目目录运行：
+    pwsh -NoProfile -File .\scripts\start-local.ps1
 
-```sh
-npm ci
-npm run configure
-npm run dev
-```
+启动器在依赖缺失时运行 npm ci；只在 .env 不存在时创建一次性配置；然后构建生产版并运行单个 Node 服务。新配置默认访问 http://localhost:8080；已有 .env 时以其中的 APP_ORIGIN 为准。按 Ctrl+C 正常停止并释放数据库锁。
 
-`npm run configure` 创建项目根目录 `.env`，默认 origin 为 `http://localhost:8080`、端口为 `8080`。本机开发请开两个 PowerShell 窗口：`npm run dev` 启动 API，`npm run dev:client` 启动 Vite；API 脚本从 `.env` 读取初始化 token 和数据目录，并覆盖本机开发 origin/端口为 `http://localhost:5173` 和 `3000`。Vite 前端支持热更新；修改后端代码时在 API 窗口按 `Ctrl+C` 停止并重新运行 `npm run dev`，避免后端热重启与单实例数据库锁发生竞争。首次打开时按页面提示使用一次性 setup token 完成初始化；token 存在 `.env`，在本机读取后输入即可。已存在 `.env` 时命令拒绝覆盖；确定要重新生成时运行 `npm run configure -- --force`。
+开发时可使用：
 
-部署到 NAS 前，将 `APP_ORIGIN` 改成用户实际访问的完整 origin，包括协议、域名或 IP 和端口，例如 `http://192.168.1.20:8080`。origin 必须与浏览器地址精确一致。`DATA_DIR` 默认 `./data`，开发数据在项目目录下。
+    pwsh -NoProfile -File .\scripts\start-dev.ps1
 
-NAS 没有宿主 Node.js 时，可在管理电脑运行 `npm run configure` 后将项目和 `.env` 一起复制到 NAS；也可直接在 NAS 的项目目录用 Docker 容器运行配置脚本，不会在命令行打印 token：
+此入口在一个终端启动 API 和 Vite，网页地址为 http://localhost:5173。生产与开发服务不要同时操作同一 DATA_DIR。
 
-```sh
-docker run --rm -v "$PWD:/work" -w /work \
-  -e APP_ORIGIN=http://192.168.1.20:8080 -e PORT=8080 \
-  -e COOKIE_SECURE=false -e DATA_DIR=/app/data \
-  node:24-bookworm-slim node scripts/configure.mjs
-```
+### 首次初始化
 
-该命令会通过目录挂载在项目根目录创建 `.env`，其中包含随机的一次性 `SETUP_TOKEN`。首次初始化时在本机私下读取该值并输入网页；不要把它放进命令历史、截图或共享日志。不要提交 `.env`。
-## Docker Compose 部署
+启动器/配置器创建的 .env 包含一次性 SETUP_TOKEN。第一次打开网页时输入 token 创建第一个 owner，并另外设置网页登录密码。密码不是 setup token。以后使用邮箱和密码登录；初始化成功后 setup token 不再用于普通登录。
 
-安装并启用 NAS 厂商提供的 Docker/Container Manager。按上一节通过 Node 24 管理电脑或 Docker 临时容器创建 `.env`，并确认 `APP_ORIGIN` 与浏览器访问地址精确一致。HTTP 局域网示例：
+不要提交 .env、复制 token 到终端参数、截图或日志。已存在的 .env 不会被本机启动器覆盖。
 
-```dotenv
-PORT=8080
-APP_ORIGIN=http://192.168.1.20:8080
-COOKIE_SECURE=false
-SETUP_TOKEN=<随机生成的值>
-```
+## 源码 Docker Compose
 
-核对 `.env` 的 `PORT`、`APP_ORIGIN`、`COOKIE_SECURE` 后，在项目目录运行：
+源码部署器当前使用 checkout 中的 compose.yaml。Linux/NAS 需要 Docker Engine、Compose v2、Bash、awk、realpath、stat、date；Windows 需要 Docker Desktop Linux 容器、PowerShell 7、Git for Windows（Bash 与 cygpath）。宿主无需 Node.js；配置和数据库备份由 Node 24 临时容器执行。
 
-```sh
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100 teamshelf
-```
+首次运行前选择并记录：
 
-浏览器打开 `http://192.168.1.20:8080`。容器健康检查请求 `GET /api/health`；可查看 `docker compose ps` 状态确认服务健康。Compose 默认创建 `teamshelf-data` 命名卷，并把它挂载到 `/app/data`。该卷随容器重建保留。
+- Compose 项目名，例如 teamshelf。
+- Docker named volume 的准确名称，例如 teamshelf-data。已有安装必须从现有容器/卷查询，不能猜名字。
+- checkout 之外的持久备份目录；它需要在 Docker daemon 主机上以同一绝对路径可见，并允许应用 UID 1000 写入。
+- 用户真正访问的 origin。HTTP 局域网示例为 http://192.168.1.20:8080；HTTPS 反向代理示例为 https://docs.example.net。不要在 origin 后写路径或尾斜线。
 
-Synology DSM 可在 Container Manager 的“项目”中选择项目目录并从 `compose.yaml` 构建启动。QNAP Container Station 的 Compose/应用功能可导入同一项目文件。若厂商界面无法构建项目，可在管理电脑运行 `docker compose build` 并将镜像导入 NAS；Compose 文件仍需在 NAS 上配置卷和环境变量。NAS CPU 常见为 amd64 或 arm64；Dockerfile 使用 Node 官方多架构基础镜像，但本项目未在本机验证 arm64 镜像构建。
+Linux/NAS 首次安装示例：
 
-通过 HTTPS 反向代理时，代理应将原始 Host 与 HTTPS 转发给容器，并仅对用户开放代理入口。设置 `APP_ORIGIN=https://docs.example.net`（不含路径或尾部斜杠）、`COOKIE_SECURE=true`；外部 HTTPS 端口为非默认值时也要写入 origin，例如 `https://docs.example.net:8443`。将 `PORT` 设为 NAS 上希望映射的端口，并保证代理目标端口与之匹配。COOKIE_SECURE 应与用户浏览器侧 HTTPS 访问一致。
+    bash deploy/source-up.sh --project teamshelf --volume teamshelf-data --backup-dir /srv/teamshelf-backups --origin https://docs.example.net --port 8080 --cookie-secure true --init-volume
 
-## 备份与恢复
+Windows PowerShell 首次安装示例：
 
-备份可在宿主机通过 Node 24 执行：
+    pwsh -NoProfile -File .\deploy\source-up.ps1 -Project teamshelf -Volume teamshelf-data -BackupDir D:/TeamShelf/backups -Origin http://localhost:8080 -Port 8080 -CookieSecure false -InitVolume
 
-```sh
-DATA_DIR=/path/to/teamshelf-data node scripts/backup.mjs /path/to/backups/teamshelf-2026-09-25.sqlite
-```
+首次安装需提供 origin 并显式授权 --init-volume / -InitVolume。该开关只允许创建缺失的空卷或明确确认的空初始化卷，不清除或替换已有数据。打开命令中的 origin；网页首次设置使用 .env 中生成的 SETUP_TOKEN，并单独设置 owner 密码。
 
-Windows PowerShell 示例：
+后续更新使用同一项目名、volume 与 backup path，移除首次初始化参数。例如：
 
-```powershell
-$env:DATA_DIR = 'D:\TeamShelf\data'
-node scripts/backup.mjs 'D:\TeamShelf\backups\teamshelf-backup.sqlite'
-```
+    bash deploy/source-up.sh --project teamshelf --volume teamshelf-data --backup-dir /srv/teamshelf-backups --origin https://docs.example.net --port 8080 --cookie-secure true
 
-脚本使用 Node SQLite 在线备份 API，备份期间可继续使用应用；目标文件已存在时会拒绝覆盖。备份中包含用户凭据哈希和文档内容，应限制备份目录访问权限。
+Windows 使用 source-up.ps1 与同样的参数。若已有 .env，部署器不会改写它；传入的 origin 必须与已有值相符，项目、卷和备份目录也不能在更新时偷偷换目标。
 
-恢复前先停止应用，并确认 `DATA_DIR/.teamshelf.lock` 已消失。服务正常关闭会自动移除锁；若异常终止留下锁，先确认所有 TeamShelf 实例已停止，再手动删除该锁文件。启动程序和恢复脚本都不会自动清理残留锁。Compose 部署执行：
+部署器会检查其他 TeamShelf 容器、Compose 项目标记、volume 身份与挂载使用者，拒绝多个实例、错卷或被其他容器占用的卷。若原数据库卷名不清楚，先从原运行容器和 Docker 卷元数据中确认；若检测到旧部署使用不同的 Compose 项目或卷，不要绕过拒绝继续启动，应先规划显式迁移和备份。
 
-```sh
-docker compose stop teamshelf
-docker compose run --rm --no-deps -v /volume1/backups/teamshelf.sqlite:/backup.sqlite:ro --entrypoint node teamshelf scripts/restore.mjs /backup.sqlite --confirm
-docker compose start teamshelf
-```
+更新过程中会先构建并检查候选镜像，再停止唯一的旧实例；如果数据库存在，则通过 Node SQLite 在线备份 API 将一致性备份写到指定的宿主机目录。只有备份成功后才用同一个 external volume 启动新容器，并等待 /api/health。备份失败时会尝试重新启动旧服务，不会启动新镜像。健康检查失败时会停止新服务、保留数据库与备份、写入受限诊断文件；不会自动恢复数据库、降级 schema、切换卷或删除卷。先查看诊断和服务状态，再由管理员安排人工恢复。
 
-将命令中的 `/volume1/backups/teamshelf.sqlite` 替换为 NAS 上实际备份文件的绝对路径；也可在 NAS 宿主机上将 `DATA_DIR` 指向数据目录运行脚本。脚本要求显式 `--confirm`，校验源库的 `PRAGMA integrity_check`，遇到任何现存锁即拒绝（请先确认所有实例停止，再人工清理残留锁）；成功前会将当前数据库保存成带时间戳的 `.rollback-*.sqlite` 副本，再清除已停止服务留下的 WAL/SHM 边车文件并安装恢复库。启动失败时停止应用，使用回滚副本再次运行 restore。恢复完成后所有现有会话都会失效，用户需要重新登录；尚未使用的邀请会被撤销，管理员需重新发送邀请。文档正文和已使用邀请记录会保留。
+## 固定 digest 更新
 
-## 升级与回滚
+私有 GHCR 固定 digest 可通过 NAS 本机 `deploy/nas-up.sh` 或配置完成后的 GitHub Deploy workflow 更新。两种方式都使用同一 release 脚本、项目名、数据卷和备份目录；不可同时运行。手动 NAS 首装、镜像认证和更新命令见下方[固定 digest 安装与更新](#nas-固定-digest-安装与更新)，GitHub runner 准备步骤见[CI/CD 指南](CICD.md)。
 
-升级前先做数据库备份，然后更新项目文件：
+## 在线备份
 
-```sh
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100 teamshelf
-```
+宿主安装 Node.js 24 时，可以在服务运行期间使用 SQLite 在线 backup API：
 
-如果新版本不能正常启动，先停止服务，使用升级前的备份恢复数据库，再切回旧项目版本并重新构建启动。Docker 命名卷在删容器、重建镜像和更新项目时保留；删除卷会删除唯一在线数据库，不要把删除卷作为普通升级步骤。
+    DATA_DIR=/srv/teamshelf-data node scripts/backup.mjs /srv/teamshelf-backups/teamshelf-2026-09-26.sqlite
 
-## 无 Docker 的 NAS
+PowerShell 示例：
 
-若 NAS 没有受支持的 Docker/Container Manager/Container Station，先在 NAS 厂商应用中心确认是否有容器管理套件可安装。没有可用容器运行时的 NAS 不能直接运行此 Compose 部署；可在局域网内已有的 Docker 主机运行服务并将数据库留在该主机本地卷，再通过 NAS 反向代理或局域网地址访问。不要将 SQLite 数据卷改为 SMB/NFS 挂载以绕过这个限制。
+    $env:DATA_DIR = 'D:/TeamShelf/data'
+    node scripts/backup.mjs 'D:/TeamShelf/backups/teamshelf-backup.sqlite'
 
-参考：[Docker Compose startup order and health checks](https://docs.docker.com/compose/how-tos/startup-order/)、[SQLite Online Backup API](https://www.sqlite.org/backup.html)、[Node.js 24 SQLite API](https://nodejs.org/docs/latest-v24.x/api/sqlite.html)。
+目标必须是新的文件名；脚本拒绝覆盖现有文件并检查备份完整性。备份包含文档与密码哈希，应限制目录权限，并使用 NAS 自己的持久备份/异地保护策略。源码 Compose 更新器会自动在备份目录写入时间戳备份；固定 digest 更新使用 release 脚本配置的备份路径。
+
+## 恢复
+
+恢复时先停止全部 TeamShelf 实例。Docker Compose Linux/NAS 部署可使用相同配置的临时服务容器；以下命令保留 Compose 项目和外部 named volume，仅将备份文件只读挂载：
+
+    docker compose stop teamshelf
+    docker compose run --rm --no-deps --volume /srv/teamshelf-backups/teamshelf.sqlite:/backup.sqlite:ro --entrypoint node teamshelf scripts/restore.mjs /backup.sqlite --confirm
+    docker compose start teamshelf
+
+将示例路径替换为实际备份文件绝对路径。若宿主机直接运行 Node 24，应先将 DATA_DIR 指向数据库所在目录，再执行 DATA_DIR=/srv/teamshelf-data node scripts/restore.mjs /srv/teamshelf-backups/teamshelf.sqlite --confirm。具体目录必须对应同一个目标数据库；不要在应用运行期间直接覆盖 SQLite、WAL 或 SHM 文件。如果恢复程序提示活动锁，先确认所有实例都已停止；不要盲目删除锁文件。
+
+恢复程序先验证备份完整性，并在覆盖当前数据库前创建 rollback 副本。成功恢复会撤销现有会话、未撤销 Agent PAT 与未使用邀请，用户需重新登录，管理员需要重新发邀请。恢复数据库启动时会使用当前程序版本的兼容初始化逻辑；不要手动降低 schema 版本。若恢复后应用无法健康启动，停止实例、保留 rollback 副本和原备份，再由管理员评估恢复方案。
+
+## 不可省略的安全约束
+
+- 数据库留在 NAS 本地 Docker named volume；不要将活动库放在 SMB/NFS 共享目录。
+- 同一卷只运行一个 TeamShelf 写入实例。
+- 备份目录放在 checkout、容器层、/tmp 和 /var/tmp 之外，并确认它是持久路径。
+- 不用 docker compose down -v 作为更新或故障处理步骤。
+- HTTPS 代理应设置精确的外部 APP_ORIGIN，并启用 COOKIE_SECURE=true。
+- NAS 型号及厂商 runner 环境未逐一实测。保证 runner 与 Docker daemon 能看到相同的备份绝对路径，并满足部署脚本要求。
+
+## NAS 固定 digest 安装与更新
+
+私有 GHCR 镜像需先在 Docker daemon 所在 NAS 登录：
+
+    docker login ghcr.io -u YOUR_GITHUB_USERNAME
+
+在交互提示中粘贴具有 read:packages 权限的 GitHub classic PAT；不要将 PAT 作为命令参数或写入 .env。GitHub Actions 的受控部署使用其短期 GITHUB_TOKEN，无需用户配置 PAT。
+
+deploy/nas-up.sh 通过固定 digest 首装或更新，不接受浮动 tag。首次需明确指定卷、外部备份目录、用户可访问的 origin、完整镜像 digest，并加 --init-volume。将下面占位文本替换为成功 CI 发布 metadata 中 imageRef 的完整 digest；不要原样执行占位值：
+
+    bash deploy/nas-up.sh --project teamshelf --volume teamshelf-data --backup-dir /srv/teamshelf-backups --origin https://docs.example.net --image-ref 'ghcr.io/zhao-zixi/team-docs@sha256:REPLACE_WITH_64_LOWERCASE_HEX' --port 8080 --cookie-secure true --init-volume
+
+已有安装会从本地 .env 读取配置并拒绝项目、卷、备份目录或 origin 不一致；后续版本用新可信 digest 调用同一命令，但移除 --init-volume。配置器只在缺少 .env 时创建它，不覆盖已有文件。NAS 更新与源码 Compose 更新不要并行，也不要对同一数据库卷执行两套更新器。
+
+GitHub 自动部署需预先完成 runner 与仓库变量配置，详见[GitHub CI/CD 指南](CICD.md)。
