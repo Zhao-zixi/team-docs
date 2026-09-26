@@ -108,10 +108,26 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 case "$BACKUP_DIR" in /tmp|/tmp/*|/var/tmp|/var/tmp/*) fail 'backup directory must be persistent, not temporary' ;; esac
 case "$BACKUP_DIR" in "$ROOT"|"$ROOT"/*) fail 'backup directory must be outside the checkout' ;; esac
-mkdir -p -- "$BACKUP_DIR"
+BACKUP_DIR_CREATED=0
+if [[ ! -e "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]]; then
+  mkdir -p -- "$(dirname -- "$BACKUP_DIR")"
+  if mkdir -m 700 -- "$BACKUP_DIR" 2>/dev/null; then BACKUP_DIR_CREATED=1
+  elif [[ ! -d "$BACKUP_DIR" ]]; then fail 'cannot create backup directory'; fi
+fi
 [[ -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]] || fail 'backup path must be a real directory'
+if (( BACKUP_DIR_CREATED )); then
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) ;;
+    *)
+      HOST_UID="$(id -u)"
+      "$DOCKER_BIN" run --rm --network none --user 0:0 --mount "type=bind,source=$BACKUP_DIR,target=/backup" --env "HOST_UID=$HOST_UID" --entrypoint node node:24-bookworm-slim -e "import('node:fs/promises').then(async fs=>{if((await fs.readdir('/backup')).length)throw new Error('new backup directory is not empty');await fs.chown('/backup',Number(process.env.HOST_UID),1000);await fs.chmod('/backup',0o770)})" || fail 'cannot prepare new backup directory for the host user and container group 1000'
+      BACKUP_OWNER="$(stat -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect initialized backup directory ownership'
+      [[ "$BACKUP_OWNER" == "$HOST_UID:1000:770" ]] || fail 'new backup directory must remain host-owned and writable by container group 1000'
+      ;;
+  esac
+fi
 BACKUP_MODE="$(stat -c %a -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory mode'
-case "${OSTYPE:-}" in msys*|cygwin*) ;; *) (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail 'backup directory must not be group/world writable unless sticky-bit protected' ;; esac
+if (( BACKUP_DIR_CREATED )); then case "${OSTYPE:-}" in msys*|cygwin*) ;; *) [[ "$BACKUP_OWNER" == "$(id -u):1000:770" ]] || fail 'new backup directory permissions are invalid' ;; esac; else case "${OSTYPE:-}" in msys*|cygwin*) ;; *) (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail 'backup directory must not be group/world writable unless sticky-bit protected' ;; esac; fi
 
 LOCK_DIR="$BACKUP_DIR/.teamshelf-release-volume-$VOLUME.lock"
 mkdir -m 700 -- "$LOCK_DIR" 2>/dev/null || fail 'another deployment is running or a stale lock exists; inspect the shared volume lock before retrying'

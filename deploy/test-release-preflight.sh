@@ -65,6 +65,14 @@ case "$1" in
 esac
 exit 0
 MOCK
+cat >"$TMP/bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  *"-c %u:%g:%a"*) if [[ -n "$MOCK_BACKUP_OWNER" ]]; then printf '%s\n' "$MOCK_BACKUP_OWNER"; exit 0; fi ;;
+  *"-c %a"*) if [[ -n "$MOCK_BACKUP_MODE" ]]; then printf '%s\n' "$MOCK_BACKUP_MODE"; exit 0; fi ;;
+esac
+exec /usr/bin/stat "$@"
+MOCK
 chmod +x "$TMP/bin/"*
 
 cat >"$TMP/.env" <<ENV
@@ -82,6 +90,7 @@ export TEAMSHELF_ENV_FILE="$TMP/.env"
 export TEAMSHELF_COMPOSE_PROJECT=teamshelf-existing
 export TEAMSHELF_DATA_VOLUME=teamshelf-existing_teamshelf-data
 export TEAMSHELF_BACKUP_DIR="$BACKUP_DIR"
+
 export MOCK_DOCKER_LOG="$TMP/docker.log"
 
 # Workflow input must be rejected before invoking Docker, and no secret may echo.
@@ -129,6 +138,25 @@ for path in "$TMP/backup-link" "$TMP/backup-link/sub"; do
   [[ ! -s "$MOCK_DOCKER_LOG" ]]
 done
 export TEAMSHELF_BACKUP_DIR="$BACKUP_DIR"
+
+# Only a host-owned directory with the image's exact GID and 0770 mode may be group-writable.
+export MOCK_BACKUP_MODE=777 MOCK_BACKUP_OWNER="$(id -u):1000:777"
+: >"$MOCK_DOCKER_LOG"
+if bash "$ROOT/deploy/release.sh" >"$TMP/insecure-mode.out" 2>&1; then
+  printf 'expected unsafe group/world writable backup directory to fail\n' >&2
+  exit 1
+fi
+grep -q 'backup directory must be private or host-owned' "$TMP/insecure-mode.out"
+[[ ! -s "$MOCK_DOCKER_LOG" ]]
+export MOCK_BACKUP_MODE=770 MOCK_BACKUP_OWNER="$(id -u):1000:770"
+: >"$MOCK_DOCKER_LOG"
+if bash "$ROOT/deploy/release.sh" >"$TMP/container-group-mode.out" 2>&1; then
+  printf 'expected later missing-volume preflight to fail\n' >&2
+  exit 1
+fi
+grep -q 'does not exist' "$TMP/container-group-mode.out"
+! grep -q 'backup directory must be' "$TMP/container-group-mode.out"
+unset MOCK_BACKUP_MODE MOCK_BACKUP_OWNER
 # A missing external volume must fail before pull, stop, or any service mutation.
 export TEAMSHELF_IMAGE_REF=ghcr.io/zhao-zixi/team-docs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 : >"$MOCK_DOCKER_LOG"

@@ -32,8 +32,13 @@ grep -q 'immutable sha256 digest' "$TMP/digest.out"
 if bash "$TEST_ROOT/deploy/nas-up.sh" --project nas-test --volume nas-test-data --backup-dir "$BACKUP" --origin http://localhost:8080/path --image-ref "$IMAGE" >"$TMP/origin.out" 2>&1; then echo 'expected non-origin URL rejection' >&2; exit 1; fi
 grep -q 'exact http(s) origin' "$TMP/origin.out"
 [[ ! -e "$TEST_ROOT/.env" && ! -e "$BACKUP" ]]
-if bash "$TEST_ROOT/deploy/nas-up.sh" --project nas-test --volume nas-test-data --backup-dir "$BACKUP" --origin http://localhost:8080 --image-ref "$IMAGE" >"$TMP/platform.out" 2>&1; then echo 'expected Linux-only NAS launcher gate' >&2; exit 1; fi
-grep -q 'run this NAS launcher in Linux' "$TMP/platform.out"
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  if bash "$TEST_ROOT/deploy/nas-up.sh" --project nas-test --volume nas-test-data --backup-dir "$BACKUP" --origin http://localhost:8080 --image-ref "$IMAGE" >"$TMP/platform.out" 2>&1; then echo 'expected Linux-only NAS launcher gate' >&2; exit 1; fi
+  grep -q 'run this NAS launcher in Linux' "$TMP/platform.out"
+else
+  if bash "$TEST_ROOT/deploy/nas-up.sh" --project 'Invalid Name' --volume nas-test-data --backup-dir "$BACKUP" --origin http://localhost:8080 --image-ref "$IMAGE" >"$TMP/platform.out" 2>&1; then echo 'expected invalid project rejection' >&2; exit 1; fi
+  grep -q 'project must use lowercase' "$TMP/platform.out"
+fi
 [[ ! -e "$TEST_ROOT/.env" && ! -e "$BACKUP" ]]
 # Static rejection must not start config generation, pull or deployment commands.
 ! grep -Eq ' run |pull|stop|up ' "$MOCK_LOG"

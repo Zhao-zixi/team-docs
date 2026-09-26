@@ -73,7 +73,8 @@ esac
 mkdir -p -- "$BACKUP_DIR"
 [[ -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]] || fail "backup path must be a real persistent directory"
 BACKUP_MODE="$(stat -c %a -- "$BACKUP_DIR")" || fail "could not inspect backup directory permissions"
-(( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail "backup directory must not be group/world writable unless sticky-bit protected"
+BACKUP_OWNER="$(stat -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail "could not inspect backup directory owner"
+if [[ "$BACKUP_OWNER" != "$(id -u):1000:770" ]]; then (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail "backup directory must be private or host-owned with container GID 1000 and mode 0770"; fi
 # Atomic shared lock directory serializes separate checkouts using this deployment backup path.
 LOCK_DIR="$BACKUP_DIR/.teamshelf-release-volume-$VOLUME.lock"
 mkdir -m 700 -- "$LOCK_DIR" 2>/dev/null || fail "another deployment is running or a stale lock exists; inspect $LOCK_DIR and remove it only after verifying no deploy is active"

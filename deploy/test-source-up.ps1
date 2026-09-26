@@ -4,8 +4,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$bash = 'C:\Project\Git\bin\bash.exe'
-if (-not (Test-Path -LiteralPath $bash)) { throw 'Git Bash was not found at the test machine path.' }
+$bash = $env:TEAMSHELF_TEST_BASH
+if (-not $bash) {
+    $bashCommand = Get-Command bash.exe -ErrorAction SilentlyContinue
+    if ($null -ne $bashCommand) { $bash = $bashCommand.Source }
+    else {
+        $candidates = @((Join-Path $env:ProgramFiles 'Git\bin\bash.exe'), 'C:\Project\Git\bin\bash.exe')
+        $bash = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    }
+}
+if (-not $bash -or -not (Test-Path -LiteralPath $bash)) { throw 'Git Bash was not found. Install Git for Windows or set TEAMSHELF_TEST_BASH.' }
 $cygpath = Join-Path (Split-Path -Parent $bash) 'cygpath.exe'
 if (-not (Test-Path -LiteralPath $cygpath)) { $cygpath = Join-Path (Split-Path -Parent (Split-Path -Parent $bash)) 'usr\bin\cygpath.exe' }
 if (-not (Test-Path -LiteralPath $cygpath)) { throw 'Git Bash cygpath.exe was not found.' }
