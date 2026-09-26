@@ -108,7 +108,20 @@ if (( BACKUP_DIR_CREATED )); then
   esac
 fi
 BACKUP_MODE="$(stat -c %a -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory permissions'
-if (( BACKUP_DIR_CREATED )); then case "${OSTYPE:-}" in msys*|cygwin*) ;; *) [[ "$BACKUP_OWNER" == "$(id -u):1000:770" ]] || fail 'new backup directory permissions are invalid' ;; esac; else (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail 'backup directory must not be group/world writable unless sticky-bit protected'; fi
+if (( BACKUP_DIR_CREATED )); then
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) ;;
+    *) [[ "$BACKUP_OWNER" == "$(id -u):1000:770" ]] || fail 'new backup directory permissions are invalid' ;;
+  esac
+else
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) ;;
+    *)
+      BACKUP_OWNER="$(stat -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory ownership'
+      [[ "$BACKUP_OWNER" == "$(id -u):1000:770" ]] || (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail 'backup directory must not be group/world writable unless sticky-bit protected'
+      ;;
+  esac
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   stage="$ROOT/.teamshelf-config-$$"

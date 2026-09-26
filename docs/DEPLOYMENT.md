@@ -30,7 +30,7 @@ TeamShelf 使用 Node.js 24 提供网页与 API，SQLite 数据库位于 DATA_DI
 
 - Compose 项目名，例如 teamshelf。
 - Docker named volume 的准确名称，例如 teamshelf-data。已有安装必须从现有容器/卷查询，不能猜名字。
-- checkout 之外的持久备份目录；它需要在 Docker daemon 主机上以同一绝对路径可见，并允许应用 UID 1000 写入。
+- checkout 之外的持久备份目录。Linux 首次安装可指定一个尚不存在的专用目录；source-up/nas-up 会创建它，并设置为部署账号拥有、容器 GID 1000 可写（0770）。Windows 入口不执行 chown，而会实际验证容器 UID 1000 是否可写。不要预先创建或 chmod 该目录；已有目录权限不会被修改，必须同时允许当前部署账号管理锁文件、应用 UID 1000 写入备份，并在 Docker daemon 主机上以同一绝对路径可见。
 - 用户真正访问的 origin。HTTP 局域网示例为 http://192.168.1.20:8080；HTTPS 反向代理示例为 https://docs.example.net。不要在 origin 后写路径或尾斜线。
 
 Linux/NAS 首次安装示例：
@@ -68,7 +68,7 @@ PowerShell 示例：
     $env:DATA_DIR = 'D:/TeamShelf/data'
     node scripts/backup.mjs 'D:/TeamShelf/backups/teamshelf-backup.sqlite'
 
-目标必须是新的文件名；脚本拒绝覆盖现有文件并检查备份完整性。备份包含文档与密码哈希，应限制目录权限，并使用 NAS 自己的持久备份/异地保护策略。源码 Compose 更新器会自动在备份目录写入时间戳备份；固定 digest 更新使用 release 脚本配置的备份路径。
+目标必须是新的文件名；脚本拒绝覆盖现有文件并检查备份完整性。备份包含文档与密码哈希，应限制目录访问，并使用 NAS 自己的持久备份/异地保护策略。源码 Compose 更新器会自动在备份目录写入时间戳备份；固定 digest 更新使用 release 脚本配置的备份路径。
 
 ## 恢复
 

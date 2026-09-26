@@ -41,7 +41,7 @@ Windows 管理员也可用仓库 helper 发起安全的默认校验：`pwsh -NoP
 
 runner 需要匹配 self-hosted、linux 与 NAS_RUNNER_LABEL 标签。云端 preflight 在安排部署任务前验证门禁变量；缺少配置时直接失败，不会将任务排队到未知 runner。
 
-NAS runner 需要 Docker Engine、Docker Compose v2、Bash 4+、jq、flock、realpath、stat、awk 与 date。NAS 本机手动运行 `deploy/nas-up.sh` 还要求 `id`、`ln`，并在 Docker daemon 所在主机预先 `docker login ghcr.io`；私有镜像登录使用具备 `read:packages` 权限的 GitHub classic PAT，通过交互提示输入，不要将 PAT 放入命令行或日志。Docker daemon 主机必须能通过脚本使用的同一绝对路径访问 TEAMSHELF_BACKUP_DIR，Node 应用 UID 1000 要能写入该目录。若 runner 位于容器中，需验证容器路径与 Docker daemon 主机的 bind mount 路径完全一致。GitHub Actions 不托管 NAS 的 SETUP_TOKEN、APP_ORIGIN 或 .env；这些仅由 NAS 本地配置管理。
+NAS runner 需要 Docker Engine、Docker Compose v2、Bash 4+、jq、flock、realpath、stat、awk 与 date。NAS 本机手动运行 `deploy/nas-up.sh` 还要求 `id`、`ln`，并在 Docker daemon 所在主机预先 `docker login ghcr.io`；私有镜像登录使用具备 `read:packages` 权限的 GitHub classic PAT，通过交互提示输入，不要将 PAT 放入命令行或日志。Docker daemon 主机必须能通过脚本使用的同一绝对路径访问 TEAMSHELF_BACKUP_DIR，Node 应用 UID 1000 要能写入该目录。NAS 启动器只对自己新建的备份目录设置部署账号所有权与容器 GID 1000 写权限；既有目录权限不会被更改，必须同时允许部署账号管理目录锁并允许 UID 1000 写入。若 runner 位于容器中，需验证容器路径与 Docker daemon 主机的 bind mount 路径完全一致。GitHub Actions 不托管 NAS 的 SETUP_TOKEN、APP_ORIGIN 或 .env；这些仅由 NAS 本地配置管理。
 
 当前私有仓库计划不依赖 GitHub Environment approval。保护依赖成功 main CI metadata 校验、云端门禁与由管理员控制的 NAS runner 注册和权限。不要把接受不可信 PR 工作流的 runner 注册为可管理生产 Docker daemon 的 runner。Synology/QNAP 型号、厂商应用中心 runner 与容器 runner 配置没有逐一验证；不能假设所有 NAS 都兼容。
 
