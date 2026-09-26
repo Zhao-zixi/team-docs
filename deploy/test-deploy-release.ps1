@@ -32,6 +32,7 @@ try {
     & pwsh -NoProfile -File $target -RunId invalid -GhPath $gh 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { throw 'Invalid run ID was accepted.' }
     if ((Get-Item -LiteralPath $log).Length -ne $before) { throw 'Invalid run ID reached gh or caused a dispatch.' }
+    $global:LASTEXITCODE = 0
     Write-Output 'CD PowerShell wrapper mock passed: default validate-only, explicit Deploy/init flags, invalid run ID rejected before gh.'
 } finally {
     Remove-Item Env:GH_ARGS_LOG -ErrorAction SilentlyContinue
