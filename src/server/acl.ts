@@ -18,6 +18,7 @@ export interface SpaceAccess {
 export interface DocumentAccess {
   teamId: string;
   spaceId: string;
+  parentId: string | null;
   teamRole: TeamRole;
   visibility: DocumentVisibility;
   version: number;
@@ -34,7 +35,9 @@ interface SpaceRow {
 }
 
 interface DocumentRow extends SpaceRow {
+  id: string;
   space_id: string;
+  parent_id: string | null;
   document_visibility: DocumentVisibility;
   document_grant_role: GrantRole | null;
   version: number;
@@ -74,17 +77,7 @@ export function getSpaceAccess(db: Db, userId: string, spaceId: string): SpaceAc
   };
 }
 
-export function getDocumentAccess(db: Db, userId: string, documentId: string): DocumentAccess | undefined {
-  const row = db.prepare(`
-    SELECT d.space_id, d.visibility AS document_visibility, d.version,
-      s.team_id, s.visibility, m.role,
-      (SELECT sg.role FROM space_grants sg WHERE sg.space_id=s.id AND sg.user_id=?) AS grant_role,
-      (SELECT dg.role FROM document_grants dg WHERE dg.document_id=d.id AND dg.user_id=?) AS document_grant_role
-    FROM documents d JOIN spaces s ON s.id=d.space_id
-    JOIN members m ON m.team_id=s.team_id AND m.user_id=?
-    WHERE d.id=?
-  `).get(userId, userId, userId, documentId) as DocumentRow | undefined;
-  if (!row) return undefined;
+function documentAccessForRow(row: DocumentRow): Pick<DocumentAccess, 'canRead' | 'canEdit' | 'canManage'> {
   const manager = isManager(row.role);
   const spaceGrant = row.grant_role ?? undefined;
   const docGrant = row.document_grant_role ?? undefined;
@@ -98,15 +91,50 @@ export function getDocumentAccess(db: Db, userId: string, documentId: string): D
   const canEdit = manager || (
     canRead && spaceCanEdit && (row.document_visibility === 'inherit' || docGrant === 'editor')
   );
+  return { canRead, canEdit, canManage: manager };
+}
+
+function documentAccessRow(db: Db, userId: string, documentId: string): DocumentRow | undefined {
+  return db.prepare(`
+    SELECT d.id, d.parent_id, d.space_id, d.visibility AS document_visibility, d.version,
+      s.team_id, s.visibility, m.role,
+      (SELECT sg.role FROM space_grants sg WHERE sg.space_id=s.id AND sg.user_id=?) AS grant_role,
+      (SELECT dg.role FROM document_grants dg WHERE dg.document_id=d.id AND dg.user_id=?) AS document_grant_role
+    FROM documents d JOIN spaces s ON s.id=d.space_id
+    JOIN members m ON m.team_id=s.team_id AND m.user_id=?
+    WHERE d.id=?
+  `).get(userId, userId, userId, documentId) as DocumentRow | undefined;
+}
+
+export function getDocumentAccess(db: Db, userId: string, documentId: string): DocumentAccess | undefined {
+  const row = documentAccessRow(db, userId, documentId);
+  if (!row) return undefined;
+  const visited = new Set<string>();
+  let current: DocumentRow | undefined = row;
+  let canRead = true;
+  let canEdit = true;
+  let canManage = true;
+  while (current) {
+    if (visited.has(current.id) || current.space_id !== row.space_id) return undefined;
+    visited.add(current.id);
+    const direct = documentAccessForRow(current);
+    canRead &&= direct.canRead;
+    canEdit &&= direct.canEdit;
+    canManage &&= direct.canManage;
+    if (!current.parent_id) break;
+    current = documentAccessRow(db, userId, current.parent_id);
+    if (!current) return undefined;
+  }
   return {
     teamId: row.team_id,
     spaceId: row.space_id,
+    parentId: row.parent_id,
     teamRole: row.role,
     visibility: row.document_visibility,
     version: row.version,
     canRead,
     canEdit,
-    canManage: manager,
+    canManage,
   };
 }
 

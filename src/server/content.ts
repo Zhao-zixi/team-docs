@@ -36,6 +36,7 @@ const UpdateSpaceSchema = z.object({
 const SpaceAccessSchema = z.object({ visibility: z.enum(['team', 'restricted']), grants: GrantsSchema }).strict();
 const CreateDocumentSchema = z.object({
   title: TitleSchema,
+  parentId: IdSchema.nullable().optional(),
   body: z.string().max(500 * 1024).optional().default(''),
   visibility: z.enum(['inherit', 'restricted']).optional().default('inherit'),
   grants: GrantsSchema.optional().default([]),
@@ -51,7 +52,7 @@ const RevisionParamsSchema = z.object({ id: IdSchema, revisionId: IdSchema }).st
 interface Params { teamId: string; spaceId: string; id: string; revisionId: string }
 interface SpaceRow { id: string; team_id: string; name: string; description: string; visibility: Visibility }
 interface DocumentRow {
-  id: string; space_id: string; title: string; body: string; visibility: 'inherit' | 'restricted'; version: number;
+  id: string; space_id: string; parent_id: string | null; title: string; body: string; visibility: 'inherit' | 'restricted'; version: number;
   created_by: string; created_at: string; updated_by: string; updated_at: string; updated_by_name: string;
 }
 interface MemberRow { role: 'owner' | 'admin' | 'editor' | 'viewer' }
@@ -105,7 +106,7 @@ function getSpace(db: AppContext['db'], spaceId: string): SpaceRow | undefined {
 }
 
 function getDocument(db: AppContext['db'], id: string): DocumentRow | undefined {
-  return db.prepare(`SELECT d.id,d.space_id,d.title,d.body,d.visibility,d.version,d.created_by,d.created_at,d.updated_by,d.updated_at,u.name AS updated_by_name
+  return db.prepare(`SELECT d.id,d.space_id,d.parent_id,d.title,d.body,d.visibility,d.version,d.created_by,d.created_at,d.updated_by,d.updated_at,u.name AS updated_by_name
     FROM documents d JOIN users u ON u.id=d.updated_by WHERE d.id=?`).get(id) as DocumentRow | undefined;
 }
 
@@ -125,7 +126,7 @@ function excerpt(body: string, limit = 240): string {
 }
 
 function toSummary(row: DocumentRow, access: NonNullable<ReturnType<typeof getDocumentAccess>>): DocumentSummary {
-  return { id: row.id, spaceId: row.space_id, title: row.title, excerpt: excerpt(row.body), visibility: row.visibility,
+  return { id: row.id, spaceId: row.space_id, parentId: row.parent_id, title: row.title, excerpt: excerpt(row.body), visibility: row.visibility,
     version: row.version, updatedAt: row.updated_at, updatedByName: row.updated_by_name,
     canEdit: access.canEdit, canManage: access.canManage };
 }
@@ -262,7 +263,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const user = actor(db, request);
     visibleSpace(db, user.id, spaceId!);
     const page = parsePage(request.query);
-    const candidates = db.prepare(`SELECT d.id,d.space_id,d.title,d.body,d.visibility,d.version,d.created_by,d.created_at,d.updated_by,d.updated_at,u.name AS updated_by_name
+    const candidates = db.prepare(`SELECT d.id,d.space_id,d.parent_id,d.title,d.body,d.visibility,d.version,d.created_by,d.created_at,d.updated_by,d.updated_at,u.name AS updated_by_name
       FROM documents d JOIN users u ON u.id=d.updated_by WHERE d.space_id=? ORDER BY d.updated_at DESC,d.id`).all(spaceId) as unknown as DocumentRow[];
     const documents = candidates.flatMap((row) => {
       const access = getDocumentAccess(db, user.id, row.id);
@@ -279,6 +280,12 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const { access } = visibleSpace(db, user.id, spaceId!);
     ensureDirectChangesAllowed(db, spaceId!);
     if (!access.canEdit) throw forbidden();
+    const parentId = input.parentId ?? null;
+    if (parentId) {
+      const parent = getDocument(db, parentId);
+      if (!parent || parent.space_id !== spaceId) throw notFound();
+      if (!getDocumentAccess(db, user.id, parentId)?.canEdit) throw forbidden();
+    }
     if (request.agentPrincipal && (input.visibility === 'restricted' || input.grants.length > 0) && (request.agentPrincipal.scope !== 'manage' || !access.canManage)) throw forbidden('Agent 凭据需要当前 manage 权限才能设置文档访问权限。');
     requireBodyBytes(input.body);
     if (input.visibility === 'restricted' && !access.canManage) throw forbidden();
@@ -288,8 +295,8 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const revisionId = randomUUID();
     const now = isoNow();
     transaction(db, () => {
-      db.prepare(`INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at)
-        VALUES(?,?,?,?,?,1,?,?,?,?)`).run(id, spaceId, input.title.trim(), input.body, input.visibility, user.id, now, user.id, now);
+      db.prepare(`INSERT INTO documents(id,space_id,parent_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at)
+        VALUES(?,?,?,?,?,?,1,?,?,?,?)`).run(id, spaceId, parentId, input.title.trim(), input.body, input.visibility, user.id, now, user.id, now);
       replaceGrants(db, 'document_grants', 'document_id', id, input.grants);
       db.prepare(`INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name)
         VALUES(?,?,1,?,?,?,?,?)`).run(revisionId, id, input.title.trim(), input.body, now, user.id, user.name);
@@ -339,6 +346,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     requireManager(access.canManage);
     ensureDirectChangesAllowed(db, access.spaceId);
     transaction(db, () => {
+      if (db.prepare('SELECT 1 FROM documents WHERE parent_id=? LIMIT 1').get(id)) throw conflict('包含子文档的文档不能删除。');
       audit(db, access.teamId, user.id, 'document.delete', 'document', id!, { title: row.title });
       db.prepare('DELETE FROM documents WHERE id=?').run(id);
     });

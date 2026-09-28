@@ -14,7 +14,7 @@ const Id = z.string().uuid();
 const Title = z.string().min(1).max(200).refine((v) => v.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(v));
 const Body = z.string().max(500 * 1024);
 const Grant = z.object({userId:Id,role:z.enum(['viewer','editor'])}).strict();
-const Create = z.object({kind:z.literal('create'),title:Title,body:Body,visibility:z.enum(['inherit','restricted']).default('inherit'),grants:z.array(Grant).max(500).default([])}).strict();
+const Create = z.object({kind:z.literal('create'),title:Title,body:Body,parentId:Id.nullable().optional(),visibility:z.enum(['inherit','restricted']).default('inherit'),grants:z.array(Grant).max(500).default([])}).strict();
 const Update = z.object({kind:z.literal('update'),baseVersion:z.number().int().positive(),title:Title,body:Body}).strict();
 const Restore = z.object({kind:z.literal('restore'),baseVersion:z.number().int().positive(),revisionId:Id}).strict();
 const Delete = z.object({kind:z.literal('delete'),baseVersion:z.number().int().positive()}).strict();
@@ -26,7 +26,7 @@ const ProposalParams = z.object({id:Id}).strict();
 const Decision = z.object({decision:z.enum(['approve','reject']),note:z.string().max(2000).optional()}).strict();
 const ListQuery = z.object({status:z.enum(['pending','approved','rejected','withdrawn','conflicted']).optional(),mine:z.coerce.boolean().optional().default(false),offset:z.coerce.number().int().min(0).max(10000000).default(0),limit:z.coerce.number().int().min(1).max(100).default(100)}).strict();
 
-type ProposalRow = {id:string;team_id:string;space_id:string;document_id:string|null;target_document_id:string|null;kind:Proposal['kind'];author_id:string;author_name:string;base_version:number|null;title:string;body:string;visibility:'inherit'|'restricted';grants_json:string;source_draft_id:string|null;revision_id:string|null;status:Proposal['status'];reviewer_id:string|null;decision_note:string|null;created_at:string;decided_at:string|null};
+type ProposalRow = {id:string;team_id:string;space_id:string;parent_id:string|null;document_id:string|null;target_document_id:string|null;kind:Proposal['kind'];author_id:string;author_name:string;base_version:number|null;title:string;body:string;visibility:'inherit'|'restricted';grants_json:string;source_draft_id:string|null;revision_id:string|null;status:Proposal['status'];reviewer_id:string|null;decision_note:string|null;created_at:string;decided_at:string|null};
 function reopenDraft(db:AppContext['db'],draftId:string|null,now:string):void{
  if(draftId)db.prepare("UPDATE document_drafts SET state='editing',updated_at=? WHERE id=? AND state='reviewing'").run(now,draftId);
 }function audit(db:AppContext['db'],teamId:string,actorId:string,action:string,targetId:string,details:Record<string,unknown>={}):void{
@@ -37,7 +37,7 @@ function sessionActor(db:AppContext['db'],request:FastifyRequest):string{
  return requireUserId(db,request);
 }
 function isManager(role:string):boolean{return role==='owner'||role==='admin';}
-function toSummary(row:ProposalRow):ProposalSummary{return {id:row.id,teamId:row.team_id,spaceId:row.space_id,documentId:row.target_document_id??row.document_id,kind:row.kind,authorId:row.author_id,authorName:row.author_name,baseVersion:row.base_version,title:row.title,status:row.status,reviewerId:row.reviewer_id,decisionNote:row.decision_note,createdAt:row.created_at,decidedAt:row.decided_at};}
+function toSummary(row:ProposalRow):ProposalSummary{return {id:row.id,teamId:row.team_id,spaceId:row.space_id,parentId:row.parent_id,documentId:row.target_document_id??row.document_id,kind:row.kind,authorId:row.author_id,authorName:row.author_name,baseVersion:row.base_version,title:row.title,status:row.status,reviewerId:row.reviewer_id,decisionNote:row.decision_note,createdAt:row.created_at,decidedAt:row.decided_at};}
 function toProposal(row:ProposalRow):Proposal{return {...toSummary(row),body:row.body,sourceDraftId:row.source_draft_id,visibility:row.visibility,grants:JSON.parse(row.grants_json) as Proposal['grants'],revisionId:row.revision_id};}
 function getProposal(db:AppContext['db'],id:string):ProposalRow|undefined{return db.prepare(`SELECT p.*,u.name AS author_name FROM proposals p JOIN users u ON u.id=p.author_id WHERE p.id=?`).get(id) as ProposalRow|undefined;}
 function requireCurrentSpaceAccess(db:AppContext['db'],userId:string,spaceId:string,canEdit:boolean){const access=getSpaceAccess(db,userId,spaceId);if(!access?.canRead)throw notFound();if(canEdit&&!access.canEdit)throw forbidden();return access;}
@@ -56,10 +56,11 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   const principal=request.agentPrincipal;const authorId=principal?.userId??requireUserId(db,request);const {spaceId}=request.params as z.infer<typeof SpaceParams>;const input=request.body as z.infer<typeof Create>;
   const space=db.prepare('SELECT id,team_id,require_review FROM spaces WHERE id=?').get(spaceId) as {id:string;team_id:string;require_review:number}|undefined;
   const access=getSpaceAccess(db,authorId,spaceId);if(!space||!access?.canRead)throw notFound();if(!access.canEdit)throw forbidden();
+  const parentId=input.parentId??null;if(parentId){const parent=db.prepare('SELECT space_id FROM documents WHERE id=?').get(parentId) as {space_id:string}|undefined;if(!parent||parent.space_id!==spaceId)throw notFound();if(!getDocumentAccess(db,authorId,parentId)?.canEdit)throw forbidden();}
   if(input.visibility==='restricted'&&!input.grants.length){} else if(input.visibility==='inherit'&&input.grants.length)throw badRequest('inherit 文档不能包含单独授权。');
   assertGrantMembers(db,space.team_id,input.grants);if(principal&&input.visibility==='restricted'&&principal.scope!=='manage')throw forbidden();
   const user=db.prepare('SELECT name FROM users WHERE id=?').get(authorId) as {name:string};const id=randomUUID(),now=isoNow();
-  transaction(db,()=>{db.prepare(`INSERT INTO proposals(id,team_id,space_id,kind,author_id,title,body,visibility,grants_json,status,created_at) VALUES(?,?,?,'create',?,?,?,?,?,'pending',?)`).run(id,space.team_id,spaceId,authorId,input.title.trim(),input.body,input.visibility,JSON.stringify(input.grants),now);audit(db,space.team_id,authorId,'submit',id,{kind:'create'});});
+  transaction(db,()=>{db.prepare(`INSERT INTO proposals(id,team_id,space_id,parent_id,kind,author_id,title,body,visibility,grants_json,status,created_at) VALUES(?,?,?,?,'create',?,?,?,?,?,'pending',?)`).run(id,space.team_id,spaceId,parentId,authorId,input.title.trim(),input.body,input.visibility,JSON.stringify(input.grants),now);audit(db,space.team_id,authorId,'submit',id,{kind:'create',parentId});});
   return reply.code(201).send({proposal:toProposal(getProposal(db,id)!)});
  });
  app.post('/documents/:id/proposals',{config:{agentAccess:{scope:'write',operation:'document.write',documentParam:'id',allowSpaceBound:true}},preValidation:[validateParams(DocumentParams),validateBody(DocumentProposal)]},async(request,reply)=>{
@@ -104,15 +105,17 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
    const authorAccess=fresh.kind==='create'?getSpaceAccess(db,fresh.author_id,fresh.space_id):fresh.target_document_id?getDocumentAccess(db,fresh.author_id,fresh.target_document_id):undefined;
    const authorAllowed=Boolean(authorAccess&&(fresh.kind==='restore'||fresh.kind==='delete'?authorAccess.canManage:authorAccess.canEdit));
    if(!authorAllowed){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='author_access_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);conflicted=true;return;}
+   if(fresh.kind==='create'&&fresh.parent_id){const parent=db.prepare('SELECT space_id FROM documents WHERE id=?').get(fresh.parent_id) as {space_id:string}|undefined;const parentAccess=getDocumentAccess(db,fresh.author_id,fresh.parent_id);if(!parent||parent.space_id!==fresh.space_id||!parentAccess?.canEdit){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='parent_access_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);conflicted=true;return;}}
    if(fresh.kind==='create') assertGrantMembers(db,fresh.team_id,JSON.parse(fresh.grants_json) as Array<{userId:string;role:'viewer'|'editor'}>);
    if(fresh.kind!=='create'){
     const current=db.prepare('SELECT version FROM documents WHERE id=? AND space_id=?').get(fresh.target_document_id,fresh.space_id) as {version:number}|undefined;
     if(!current||current.version!==fresh.base_version){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='base_version_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);audit(db,fresh.team_id,reviewer,'conflict',id,{kind:fresh.kind});conflicted=true;return;}
    }
    if(fresh.kind==='create'){
-    const documentId=randomUUID();db.prepare(`INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,?,?,1,?,?,?,?)`).run(documentId,fresh.space_id,fresh.title,fresh.body,fresh.visibility,fresh.author_id,fresh.created_at,reviewer,now);
+    const documentId=randomUUID();db.prepare(`INSERT INTO documents(id,space_id,parent_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,?,?,?,1,?,?,?,?)`).run(documentId,fresh.space_id,fresh.parent_id,fresh.title,fresh.body,fresh.visibility,fresh.author_id,fresh.created_at,reviewer,now);
     replaceDocumentGrants(db,documentId,JSON.parse(fresh.grants_json) as Array<{userId:string;role:'viewer'|'editor'}>);insertRevision(db,documentId,1,fresh.title,fresh.body,reviewer,user.name,now);db.prepare('UPDATE proposals SET document_id=? WHERE id=?').run(documentId,id);
    } else if(fresh.kind==='delete'){
+    if(db.prepare('SELECT 1 FROM documents WHERE parent_id=? LIMIT 1').get(fresh.target_document_id)){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='document_has_children',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);conflicted=true;return;}
     audit(db,fresh.team_id,reviewer,'document.delete.approved',fresh.target_document_id!,{proposalId:id,title:fresh.title});db.prepare('DELETE FROM documents WHERE id=?').run(fresh.target_document_id);
    } else {
     const current=db.prepare('SELECT version FROM documents WHERE id=?').get(fresh.target_document_id) as {version:number};const version=current.version+1;

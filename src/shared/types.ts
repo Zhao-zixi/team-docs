@@ -55,6 +55,7 @@ export interface Space {
 export interface DocumentSummary {
   id: string;
   spaceId: string;
+  parentId: string | null;
   title: string;
   excerpt: string;
   visibility: DocumentVisibility;
@@ -118,6 +119,7 @@ export type ProposalKind = 'create' | 'update' | 'restore' | 'delete';
 export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'withdrawn' | 'conflicted';
 export interface ProposalSummary {
   id: string; teamId: string; spaceId: string; documentId: string | null; kind: ProposalKind;
+  parentId: string | null;
   authorId: string; authorName: string; baseVersion: number | null; title: string; status: ProposalStatus;
   reviewerId: string | null; decisionNote: string | null; createdAt: string; decidedAt: string | null;
 }

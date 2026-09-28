@@ -115,7 +115,7 @@ export function openDatabase(dataDir: string): Db {
 
   `);
   const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (currentVersion > 8) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
+  if (currentVersion > 9) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
   if (currentVersion < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tokens (
@@ -341,6 +341,15 @@ export function openDatabase(dataDir: string): Db {
       CREATE INDEX IF NOT EXISTS external_room_access_idx ON external_room_access_logs(room_id,accessed_at DESC,id);
       PRAGMA user_version = 8;
     `);
+  }
+  if (currentVersion < 9) {
+    transaction(db, () => {
+      const documentColumns = new Set((db.prepare('PRAGMA table_info(documents)').all() as Array<{ name: string }>).map((column) => column.name));
+      const proposalColumns = new Set((db.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>).map((column) => column.name));
+      if (!documentColumns.has('parent_id')) db.exec('ALTER TABLE documents ADD COLUMN parent_id TEXT REFERENCES documents(id) ON DELETE RESTRICT');
+      if (!proposalColumns.has('parent_id')) db.exec('ALTER TABLE proposals ADD COLUMN parent_id TEXT');
+      db.exec('CREATE INDEX IF NOT EXISTS documents_parent_idx ON documents(parent_id); CREATE INDEX IF NOT EXISTS proposals_parent_idx ON proposals(parent_id); PRAGMA user_version = 9;');
+    });
   }
   return db;
 }

@@ -31,7 +31,31 @@ function requireManager(db:AppContext['db'],teamId:string,userId:string):void{co
 function summary(db:AppContext['db'],row:RoomRow):ExternalRoomSummary{const count=(db.prepare('SELECT COUNT(*) AS count FROM external_room_items WHERE room_id=?').get(row.id) as {count:number}).count;const last=db.prepare('SELECT MAX(accessed_at) AS accessed_at FROM external_room_access_logs WHERE room_id=?').get(row.id) as {accessed_at:string|null};return{id:row.id,teamId:row.team_id,name:row.name,expiresAt:row.expires_at,revokedAt:row.revoked_at,itemCount:Number(count),createdAt:row.created_at,createdBy:row.created_by??'',lastAccessAt:last.accessed_at};}
 function managerRooms(db:AppContext['db'],teamId:string):RoomRow[]{return db.prepare('SELECT * FROM external_rooms WHERE team_id=? ORDER BY created_at DESC,id').all(teamId) as RoomRow[];}
 function snapshot(db:AppContext['db'],userId:string,teamId:string,documentId:string,version:number):Snapshot{const access=getDocumentAccess(db,userId,documentId);if(!access?.canManage||access.teamId!==teamId)throw notFound();const row=db.prepare(`SELECT r.document_id,r.version,r.title,r.body,d.space_id,s.team_id FROM revisions r JOIN documents d ON d.id=r.document_id JOIN spaces s ON s.id=d.space_id WHERE r.document_id=? AND r.version=?`).get(documentId,version) as Snapshot|undefined;if(!row||row.team_id!==teamId)throw notFound();return row;}
-function aclFingerprint(db:AppContext['db'],documentId:string):string{const row=db.prepare(`SELECT d.visibility AS doc_visibility,s.visibility AS space_visibility,d.space_id,s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?`).get(documentId) as {doc_visibility:string;space_visibility:string;space_id:string;team_id:string}|undefined;if(!row)throw notFound();const spaces=db.prepare('SELECT user_id,role FROM space_grants WHERE space_id=? ORDER BY user_id,role').all(row.space_id);const docs=db.prepare('SELECT user_id,role FROM document_grants WHERE document_id=? ORDER BY user_id,role').all(documentId);const members=db.prepare('SELECT user_id,role FROM members WHERE team_id=? ORDER BY user_id,role').all(row.team_id);return createHash('sha256').update(JSON.stringify([row,spaces,docs,members])).digest('hex');}
+function aclFingerprint(db:AppContext['db'],documentId:string):string{
+ const root=db.prepare('SELECT space_id,team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?').get(documentId) as {space_id:string;team_id:string}|undefined;
+ if(!root)throw notFound();
+ const target=db.prepare('SELECT parent_id FROM documents WHERE id=?').get(documentId) as {parent_id:string|null}|undefined;
+ if(!target)throw notFound();
+ if(!target.parent_id){
+  const legacyRow=db.prepare(`SELECT d.visibility AS doc_visibility,s.visibility AS space_visibility,d.space_id,s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?`).get(documentId);
+  const spaces=db.prepare('SELECT user_id,role FROM space_grants WHERE space_id=? ORDER BY user_id,role').all(root.space_id);
+  const docs=db.prepare('SELECT user_id,role FROM document_grants WHERE document_id=? ORDER BY user_id,role').all(documentId);
+  const members=db.prepare('SELECT user_id,role FROM members WHERE team_id=? ORDER BY user_id,role').all(root.team_id);
+  return createHash('sha256').update(JSON.stringify([legacyRow,spaces,docs,members])).digest('hex');
+ }
+ const visited=new Set<string>();const chain=[] as unknown[];let current:string|null=documentId;
+ while(current){
+  if(visited.has(current))throw notFound();visited.add(current);
+  const row=db.prepare(`SELECT d.id,d.parent_id,d.visibility AS doc_visibility,s.visibility AS space_visibility,d.space_id,s.team_id
+    FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?`).get(current) as {id:string;parent_id:string|null;doc_visibility:string;space_visibility:string;space_id:string;team_id:string}|undefined;
+  if(!row||row.space_id!==root.space_id||row.team_id!==root.team_id)throw notFound();
+  const grants=db.prepare('SELECT user_id,role FROM document_grants WHERE document_id=? ORDER BY user_id,role').all(current);
+  chain.push([row,grants]);current=row.parent_id;
+ }
+ const spaces=db.prepare('SELECT user_id,role FROM space_grants WHERE space_id=? ORDER BY user_id,role').all(root.space_id);
+ const members=db.prepare('SELECT user_id,role FROM members WHERE team_id=? ORDER BY user_id,role').all(root.team_id);
+ return createHash('sha256').update(JSON.stringify([root,chain,spaces,members])).digest('hex');
+}
 function logAccess(db:AppContext['db'],roomId:string,outcome:'session_created'|'items_viewed'|'document_viewed',documentId:string|null=null):void{db.prepare('INSERT INTO external_room_access_logs(id,room_id,document_id,outcome,accessed_at) VALUES(?,?,?,?,?)').run(randomUUID(),roomId,documentId,outcome,isoNow());}
 function activeRoom(db:AppContext['db'],roomId:string):RoomRow{const row=db.prepare('SELECT * FROM external_rooms WHERE id=?').get(roomId) as RoomRow|undefined;if(!row||row.revoked_at||row.expires_at<=isoNow())throw notFound();if(!row.created_by)throw notFound();const role=db.prepare('SELECT role FROM members WHERE team_id=? AND user_id=?').get(row.team_id,row.created_by) as {role:string}|undefined;if(!role||!['owner','admin'].includes(role.role))throw notFound();return row;}
 function publicRoom(db:AppContext['db'],request:FastifyRequest,token:string):{room:RoomRow;sessionHash:string}{const room=db.prepare('SELECT * FROM external_rooms WHERE token_hash=?').get(hashToken(token)) as RoomRow|undefined;if(!room)throw notFound();const current=activeRoom(db,room.id);const raw=request.cookies?.[SessionCookie];if(!raw)throw forbidden('请先输入资料室口令。');const sessionHash=hashToken(raw);const valid=db.prepare(`SELECT 1 FROM external_room_sessions WHERE token_hash=? AND room_id=? AND session_generation=? AND expires_at>?`).get(sessionHash,current.id,current.session_generation,isoNow());if(!valid)throw forbidden('资料室会话已失效，请重新输入口令。');return{room:current,sessionHash};}

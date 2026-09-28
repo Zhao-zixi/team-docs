@@ -12,6 +12,7 @@ export interface ProposalReviewPanelProps {
   teamId: string;
   currentUserId: string;
   canReview: boolean;
+  documentTitles?: ReadonlyMap<string, string>;
   onChanged?(): void;
 }
 
@@ -21,7 +22,7 @@ function safeLink(href?: string) {
   catch { return undefined; }
 }
 
-export function ProposalReviewPanel({ teamId, currentUserId, canReview, onChanged }: ProposalReviewPanelProps) {
+export function ProposalReviewPanel({ teamId, currentUserId, canReview, documentTitles, onChanged }: ProposalReviewPanelProps) {
   const [items, setItems] = useState<ProposalSummary[]>([]);
   const [selected, setSelected] = useState<Proposal | null>(null);
   const [baseline, setBaseline] = useState<Document | null>(null);
@@ -86,13 +87,13 @@ export function ProposalReviewPanel({ teamId, currentUserId, canReview, onChange
     {loading && !items.length && <div className="agent-loading">正在加载提案…</div>}
     {!loading && !items.length && <div className="agent-empty"><Clock3 size={19}/><strong>没有{status === "pending" ? "待审阅" : "匹配"}提案</strong><span>新建、更新、恢复或删除操作可按空间审阅规则提交。</span></div>}
     <div className="proposal-list">{items.map(item => <button type="button" className="proposal-row" key={item.id} onClick={() => void open(item)}>
-      <span className={`proposal-kind-icon ${item.kind}`}>{kindIcon(item.kind)}</span><span className="proposal-row-copy"><strong>{item.title || "未命名文档"}</strong><small>{item.authorName} · {kindLabel[item.kind]} · {new Date(item.createdAt).toLocaleString("zh-CN")}</small></span><span className={`proposal-status ${item.status}`}>{statusLabel[item.status]}</span>
+      <span className={`proposal-kind-icon ${item.kind}`}>{kindIcon(item.kind)}</span><span className="proposal-row-copy"><strong>{item.title || "未命名文档"}</strong><small>{item.authorName} · {kindLabel[item.kind]}{item.kind === "create" ? (item.parentId ? ` · 子文档，父文档：${documentTitles?.get(item.parentId) ?? `上级文档（ID: ${item.parentId.slice(0, 8)}）`}` : " · 根文档") : ""} · {new Date(item.createdAt).toLocaleString("zh-CN")}</small></span><span className={`proposal-status ${item.status}`}>{statusLabel[item.status]}</span>
     </button>)}</div>
     {selected && <div className="modal-scrim" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) setSelected(null); }}>
       <section className="modal-card proposal-detail-card" role="dialog" aria-modal="true" aria-labelledby="proposal-detail-title">
         <header className="modal-head"><div><span className="eyebrow">{kindLabel[selected.kind]} · {statusLabel[selected.status]}</span><h2 id="proposal-detail-title">{selected.title || "未命名文档"}</h2></div><button className="icon-button" aria-label="关闭提案详情" onClick={() => setSelected(null)}><X/></button></header>
         <div className="modal-body proposal-detail-body">
-          <div className="proposal-meta"><span>提交者：{selected.authorName}</span><span>基于版本：{selected.baseVersion ?? "新文档"}</span>{baseline&&<span>当前正式版本：v{baseline.version}</span>}<span>提交时间：{new Date(selected.createdAt).toLocaleString("zh-CN")}</span></div>
+          <div className="proposal-meta"><span>提交者：{selected.authorName}</span>{selected.kind === "create"&&<span>{selected.parentId?`父文档：${documentTitles?.get(selected.parentId)??`上级文档（ID: ${selected.parentId.slice(0, 8)}）`}`:"根文档（无父文档）"}</span>}<span>基于版本：{selected.baseVersion ?? "新文档"}</span>{baseline&&<span>当前正式版本：v{baseline.version}</span>}<span>提交时间：{new Date(selected.createdAt).toLocaleString("zh-CN")}</span></div>
           {selected.kind === "delete" ? <div className="inline-note"><Trash2 size={15}/>批准后会删除正式文档，提案与审计记录仍会保留。</div> : <>
             {selected.kind !== "create" && <section className="proposal-baseline"><strong>当前正式内容版本 {selected.baseVersion ?? "—"}</strong><p>请在文档历史或正文中核对当前版本后再决定。</p></section>}
             {selected.kind === "create" ? <article className="proposal-markdown"><pre>{selected.body}</pre></article> : baseline ? <ReviewDiff before={`${baseline.title}`+"\n"+baseline.body} after={`${selected.title}`+"\n"+selected.body} beforeLabel={`当前正式内容 v${baseline.version}`} afterLabel="提案内容"/> : <article className="proposal-markdown"><strong>提案内容</strong><pre>{selected.body}</pre></article>}

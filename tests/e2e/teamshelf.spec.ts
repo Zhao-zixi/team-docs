@@ -129,13 +129,35 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const editor = page.locator(".ProseMirror");
   await expect(editor).toBeVisible();
   await editor.click(); await page.keyboard.press("End"); await page.keyboard.type(" 安全编辑");
+  await page.getByRole("button", { name: "粗体" }).click(); await page.keyboard.type("工具栏加粗");
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page.getByText(/已保存 · v2/)).toBeVisible();
   const saved = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, publicDocId);
   expect(saved.body).toContain("安全编辑");
+  expect(saved.body).toContain("**工具栏加粗**");
   await page.reload();
   await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
   await expect(page.locator(".markdown-preview")).toContainText("安全编辑");
+
+  // Put the parent beyond the first REST page and verify the UI fetches the complete tree.
+  const paginationRequests: number[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === `/api/spaces/${spaceId}/documents`) paginationRequests.push(Number(url.searchParams.get("offset") ?? 0));
+  });
+  const fillerResult = await page.evaluate(async space => {
+    for (let index = 0; index < 100; index++) {
+      const response = await fetch(`/api/spaces/${space}/documents`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "TeamShelf" }, body: JSON.stringify({ title: `分页填充-${String(index + 1).padStart(3, "0")}`, body: "分页回归用文档" }) });
+      if (response.status !== 201) return { status: response.status, index };
+    }
+    return { status: 201, index: 100 };
+  }, spaceId);
+  expect(fillerResult).toEqual({ status: 201, index: 100 });
+  await page.reload();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect.poll(() => page.locator(".document-link").count()).toBe(101);
+  expect(paginationRequests).toContain(0);
+  expect(paginationRequests).toContain(100);
 
   // Independent rails keep the document/editor mounted and persist across reloads.
   const teamRailToggle = page.getByRole("button", { name: "折叠团队侧栏" });
@@ -234,6 +256,48 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await reviewToggle.check();
   await reviewPolicyDialog.getByRole("button", { name: "保存规则" }).click();
   await expect(page.locator(".toast[role=status]")).toContainText("此知识库已启用提交审阅");
+
+  const childTitle = "分页树下的子文档";
+  await page.getByRole("button", { name: "新建子文档" }).click();
+  const childDialog = page.getByRole("dialog");
+  await expect(childDialog.getByText("父文档：团队公开说明")).toBeVisible();
+  await childDialog.getByLabel("文档标题").fill(childTitle);
+  await childDialog.getByLabel("Markdown 正文").fill("这篇子文档用于验证父子关系和审阅流程。");
+  await childDialog.getByRole("button", { name: "创建文档" }).click();
+  await expect(page.locator(".toast[role=status]")).toContainText("子文档提案已提交");
+  await expect(page.locator(".document-link").filter({ hasText: childTitle })).toHaveCount(0);
+
+  await reviewerPage.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
+  await expect(reviewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await reviewerPage.getByRole("button", { name: "提案审阅" }).click();
+  const childReviewPanel = reviewerPage.getByRole("region", { name: "提案审阅" });
+  await childReviewPanel.getByRole("button", { name: new RegExp(childTitle) }).click();
+  const childProposalDetail = reviewerPage.getByRole("dialog", { name: childTitle });
+  await expect(childProposalDetail.getByText("父文档：团队公开说明")).toBeVisible();
+  await childProposalDetail.getByRole("button", { name: "批准提案" }).click();
+  await page.reload();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  const parentTreeRow = page.locator(".document-link").filter({ hasText: "团队公开说明" });
+  const childTreeRow = page.locator(".document-link").filter({ hasText: childTitle });
+  await expect(parentTreeRow).toHaveAttribute("data-document-depth", "0");
+  await expect(childTreeRow).toHaveAttribute("data-document-depth", "1");
+  const treeOrder = await page.locator(".document-link").evaluateAll(rows => ({
+    parent: rows.findIndex(row => row.textContent?.includes("团队公开说明")),
+    child: rows.findIndex(row => row.textContent?.includes("分页树下的子文档")),
+  }));
+  expect(treeOrder.child).toBe(treeOrder.parent + 1);
+  await childTreeRow.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/screenshots/document-tree-desktop.png" });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.getByRole("button", { name: "打开文档列表" }).click();
+  await expect(page.locator(".doc-nav")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  await childTreeRow.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/screenshots/document-tree-mobile-375.png" });
+  await page.getByRole("button", { name: "返回文档正文" }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "删除文档" }).click();
+  await expect(page.locator(".toast[role=status]")).toContainText("包含 1 个子文档，不能删除");
 
   const proposalEditor = page.getByLabel("Markdown 正文");
   await proposalEditor.fill((await proposalEditor.inputValue()) + "\n\n提交审核的内容");
@@ -467,6 +531,8 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await viewerPage.goto(publicUrl);
   await expect(viewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
   await expect(viewerPage.getByLabel("Markdown 正文")).toBeDisabled();
+  await expect(viewerPage.getByRole("button", { name: "新建子文档" })).toHaveCount(0);
+  await expect(viewerPage.getByRole("button", { name: "新建文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "保存", exact: true })).toHaveCount(0);
   await expect(viewerPage.locator(".markdown-preview")).toContainText("安全编辑");
   await viewerPage.screenshot({ path: "test-results/teamshelf-desktop.png", fullPage: true });
