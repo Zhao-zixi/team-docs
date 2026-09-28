@@ -161,5 +161,3 @@ describe('collaborative drafts websocket', () => {
     expect(socket1.readyState).toBe(1);expect(socket2.readyState).toBe(1);socket1.close();socket2.close();
   });
 });
-
-
