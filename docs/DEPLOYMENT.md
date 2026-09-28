@@ -24,7 +24,14 @@ TeamShelf 使用 Node.js 24 提供网页与 API，SQLite 数据库位于 DATA_DI
 
 ## 源码 Docker Compose
 
-源码部署器当前使用 checkout 中的 compose.yaml。Linux/NAS 需要 Docker Engine、Compose v2、Bash、awk、realpath、stat、date；Windows 需要 Docker Desktop Linux 容器、PowerShell 7、Git for Windows（Bash 与 cygpath）。宿主无需 Node.js；配置和数据库备份由 Node 24 临时容器执行。
+源码部署器当前使用 checkout 中的 compose.yaml。Linux/NAS 需要 Docker Engine、Compose v2、Bash 4+、awk、GNU realpath/stat、date；macOS 可通过 Homebrew 提供所需 Bash/GNU coreutils：
+
+    brew install bash coreutils
+    export PATH="$(brew --prefix)/bin:$PATH"
+    bash --version
+    command -v grealpath gstat
+
+确认 Bash 为 4+ 且 `grealpath`、`gstat` 可用，再运行 Bash 部署命令。Windows 需要 Docker Desktop Linux 容器、Windows PowerShell 5.1 或 PowerShell 7、Git for Windows（Bash 与 cygpath）。宿主无需 Node.js；配置和数据库备份由 Node 24 临时容器执行。macOS 兼容性按上述工具调用静态核对和 Bash mock 验证，尚未在 macOS 主机实跑。
 
 首次运行前选择并记录：
 
@@ -49,9 +56,49 @@ Windows PowerShell 首次安装示例：
 
 Windows 使用 source-up.ps1 与同样的参数。若已有 .env，部署器不会改写它；传入的 origin 必须与已有值相符，项目、卷和备份目录也不能在更新时偷偷换目标。
 
+### 从默认 main 分支更新源码
+
+需要直接更新本地 Git checkout 时，可显式要求部署器从 GitHub 默认 `main` 快进后部署。此模式要求当前分支就是 `main`，tracked 文件没有暂存或未暂存修改，并且本地 `main` 是本次 `git fetch origin main` 实际取回 commit 的祖先；不会依赖可能过期的 `origin/main` remote-tracking 引用。脚本检查 `FETCH_HEAD` 指向的 commit 后执行 `merge --ff-only`。本地领先、分叉、fetch 失败或发生冲突都会停止，且不会启动 Docker 部署；脚本不会 reset，也不会清理未跟踪文件。成功后会用更新后的脚本重新执行，并沿用原项目名、数据卷、备份目录、origin、端口和 cookie 参数。普通命令不加开关时仍只部署当前 checkout。
+
+Linux、NAS 或 macOS Bash 示例（使用原安装参数并加 `--from-main`）：
+
+    bash deploy/source-up.sh --project teamshelf --volume teamshelf-data --backup-dir /srv/teamshelf-backups --origin https://docs.example.net --port 8080 --cookie-secure true --from-main
+
+Windows PowerShell 示例：
+
+    powershell -NoProfile -File .\deploy\source-up.ps1 -Project teamshelf -Volume teamshelf-data -BackupDir D:/TeamShelf/backups -Origin http://localhost:8080 -Port 8080 -CookieSecure false -FromMain
+
+`-FromMain` 会让当前 PowerShell wrapper 也在快进后以原参数重启新版 wrapper；Windows 仍需安装 Git for Windows 与 Docker Desktop。非 Git 下载包没有 `origin/main`，不能使用此开关；请按发行来源取得新版源码后，再使用普通部署命令。
+
+`--from-main` / `-FromMain` 只更新源码 checkout，不会拉取或改写固定 digest。已采用 NAS 固定 digest 的安装仍按下方固定 digest 章节，选用 CI 成功发布 metadata 中的完整 `imageRef` 并运行 `deploy/nas-up.sh` 更新。
+
+升级前先确认你知道现有 Compose 项目名、external volume 名和 `.env` 所用 origin，并为 Docker named volume 与外部备份目录安排 NAS/主机侧快照或完整复制。若 NAS 没有卷快照，可在项目根目录停服后把整个 `/app/data` volume 复制到外部备份目录；使用同一 Docker daemon 可见的备份路径。示例中的 `teamshelf-data` 和 `/srv/teamshelf-backups` 必须替换为现有安装的实际卷名和 `.env` 备份路径；外部目录须已存在且可由容器 UID 1000/GID 1000 写入（source-up 管理的目录通常满足此条件），不要为此修改既有目录所有权。先创建唯一目标名称并确认目录可用：
+
+```sh
+snapshot_name="pre-main-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+docker volume inspect teamshelf-data >/dev/null || { echo 'Configured data volume is missing' >&2; exit 1; }
+test -d /srv/teamshelf-backups || { echo 'Backup directory is missing' >&2; exit 1; }
+docker run --rm --network none --user 1000:1000 --mount "type=bind,source=/srv/teamshelf-backups,target=/backup" --entrypoint node node:24-bookworm-slim -e 'require("node:fs").accessSync("/backup", require("node:fs").constants.W_OK)' || exit 1
+docker compose stop teamshelf || exit 1
+if docker run --rm --network none --user 1000:1000 \
+  --mount type=volume,src=teamshelf-data,dst=/data,readonly \
+  --mount "type=bind,source=/srv/teamshelf-backups,target=/backup" \
+  --env "SNAPSHOT_NAME=$snapshot_name" --entrypoint node node:24-bookworm-slim \
+  --input-type=module -e 'import { cp } from "node:fs/promises"; await cp("/data", `/backup/${process.env.SNAPSHOT_NAME}`, { recursive: true, errorOnExist: true, force: false });'; then
+  docker compose start teamshelf
+else
+  docker compose start teamshelf
+  exit 1
+fi
+```
+
+Compose 的服务键在当前 `compose.yaml` 中是 `teamshelf`。副本包含完整 `DATA_DIR`，包括 SQLite 与 SMTP key；如复制失败，应确认服务已重新启动再排查。
+
+部署器在停机后会额外创建一致性 SQLite `.sqlite` 备份，但这个文件只包含数据库，不包含 `DATA_DIR/mail-encryption.key` 或可能存在的数据目录附件。SMTP 加密主密钥和数据目录文件仍留在同一个持久 named volume；不要更换/删除该卷。数据库快照不能单独用于完整恢复邮件配置，需同时保护原 volume 中的密钥。源码更新不会安装或混入其他分支的完整备份中心。
+
 部署器会检查其他 TeamShelf 容器、Compose 项目标记、volume 身份与挂载使用者，拒绝多个实例、错卷或被其他容器占用的卷。若原数据库卷名不清楚，先从原运行容器和 Docker 卷元数据中确认；若检测到旧部署使用不同的 Compose 项目或卷，不要绕过拒绝继续启动，应先规划显式迁移和备份。
 
-更新过程中会先构建并检查候选镜像，再停止唯一的旧实例；如果数据库存在，则通过 Node SQLite 在线备份 API 将一致性备份写到指定的宿主机目录。只有备份成功后才用同一个 external volume 启动新容器，并等待 /api/health。备份失败时会尝试重新启动旧服务，不会启动新镜像。健康检查失败时会停止新服务、保留数据库与备份、写入受限诊断文件；不会自动恢复数据库、降级 schema、切换卷或删除卷。先查看诊断和服务状态，再由管理员安排人工恢复。
+更新过程中会先构建并检查候选镜像，再停止唯一的旧实例；如果数据库存在，则通过 Node SQLite 在线备份 API 将一致性 `.sqlite` 备份写到指定的宿主机目录。只有备份成功后才用同一个 external volume 启动新容器，并等待 /api/health。备份失败时会尝试重新启动旧服务，不会启动新镜像。健康检查失败时会停止新服务、保留数据库与备份、写入受限诊断文件；不会自动恢复数据库、降级 schema、切换卷或删除卷。先查看诊断和服务状态，再由管理员安排人工恢复。`.sqlite` 文件不是整个 `DATA_DIR` 的副本，SMTP 密钥仍依赖原数据卷。
 
 ## 固定 digest 更新
 

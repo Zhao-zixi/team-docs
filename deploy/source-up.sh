@@ -6,7 +6,10 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 COMPOSE_FILE="$ROOT/compose.yaml"
 ENV_FILE="$ROOT/.env"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
+REALPATH_BIN="${REALPATH_BIN:-}"
+STAT_BIN="${STAT_BIN:-}"
 INIT_VOLUME=0
+FROM_MAIN=0
 ARG_PROJECT=""
 ARG_VOLUME=""
 ARG_ORIGIN=""
@@ -16,11 +19,12 @@ ARG_BACKUP_DIR=""
 
 usage() {
   cat <<'USAGE'
-Usage: bash deploy/source-up.sh --project NAME --volume NAME --backup-dir ABSOLUTE_PATH [--origin URL] [--port PORT] [--cookie-secure true|false] [--init-volume]
+Usage: bash deploy/source-up.sh --project NAME --volume NAME --backup-dir ABSOLUTE_PATH [--origin URL] [--port PORT] [--cookie-secure true|false] [--init-volume] [--from-main]
 
 First run requires --origin and --init-volume. The launcher creates .env only
 when absent, builds from this checkout, and updates the selected Docker volume.
 Existing .env files are never rewritten. Backups stay outside this checkout.
+--from-main updates a clean main checkout by fast-forwarding origin/main before deployment.
 USAGE
 }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -35,11 +39,43 @@ while (($#)); do
     --cookie-secure) (($# >= 2)) || fail "--cookie-secure requires true or false"; ARG_COOKIE_SECURE="$2"; shift 2 ;;
     --backup-dir) (($# >= 2)) || fail "--backup-dir requires a value"; ARG_BACKUP_DIR="$2"; shift 2 ;;
     --init-volume) INIT_VOLUME=1; shift ;;
+    --from-main) FROM_MAIN=1; shift ;;
     *) usage >&2; fail "unknown argument: $1" ;;
   esac
 done
 
-for command in bash awk realpath stat date; do command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"; done
+# Opt-in source update. Never deploy a branch, local-only commit, or dirty tracked tree.
+# Re-enter the updated script without --from-main so this update runs exactly once.
+if (( FROM_MAIN )); then
+  GIT_BIN="${GIT_BIN:-git}"
+  command -v "$GIT_BIN" >/dev/null 2>&1 || fail 'Git is required for --from-main'
+  BRANCH="$("$GIT_BIN" -C "$ROOT" branch --show-current 2>/dev/null)" || fail 'cannot inspect checkout branch'
+  [[ "$BRANCH" == main ]] || fail '--from-main is allowed only from the main branch'
+  "$GIT_BIN" -C "$ROOT" diff --quiet HEAD -- || fail 'tracked working tree must be clean before --from-main'
+  "$GIT_BIN" -C "$ROOT" fetch origin main || fail 'git fetch origin main failed; deployment was not started'
+  FETCHED_MAIN="$("$GIT_BIN" -C "$ROOT" rev-parse --verify 'FETCH_HEAD^{commit}')" || fail 'cannot resolve the commit fetched from origin/main'
+  [[ "$FETCHED_MAIN" =~ ^[0-9a-fA-F]{40,64}$ ]] || fail 'fetch did not resolve a commit; deployment was not started'
+  "$GIT_BIN" -C "$ROOT" merge-base --is-ancestor HEAD "$FETCHED_MAIN" || fail 'local main is ahead of or diverged from the freshly fetched origin/main; refusing deployment'
+  "$GIT_BIN" -C "$ROOT" merge --ff-only "$FETCHED_MAIN" || fail 'git merge --ff-only of freshly fetched origin/main failed; deployment was not started'
+  reexec_args=()
+  [[ -n "$ARG_PROJECT" ]] && reexec_args+=(--project "$ARG_PROJECT")
+  [[ -n "$ARG_VOLUME" ]] && reexec_args+=(--volume "$ARG_VOLUME")
+  [[ -n "$ARG_ORIGIN" ]] && reexec_args+=(--origin "$ARG_ORIGIN")
+  [[ -n "$ARG_PORT" ]] && reexec_args+=(--port "$ARG_PORT")
+  [[ -n "$ARG_COOKIE_SECURE" ]] && reexec_args+=(--cookie-secure "$ARG_COOKIE_SECURE")
+  [[ -n "$ARG_BACKUP_DIR" ]] && reexec_args+=(--backup-dir "$ARG_BACKUP_DIR")
+  (( INIT_VOLUME )) && reexec_args+=(--init-volume)
+  exec bash "$ROOT/deploy/source-up.sh" "${reexec_args[@]}"
+fi
+
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  REALPATH_BIN="${REALPATH_BIN:-grealpath}"
+  STAT_BIN="${STAT_BIN:-gstat}"
+else
+  REALPATH_BIN="${REALPATH_BIN:-realpath}"
+  STAT_BIN="${STAT_BIN:-stat}"
+fi
+for command in bash awk date "$REALPATH_BIN" "$STAT_BIN"; do command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"; done
 command -v "$DOCKER_BIN" >/dev/null 2>&1 || fail 'Docker CLI not found'
 "$DOCKER_BIN" compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is unavailable'
 [[ -f "$COMPOSE_FILE" ]] || fail 'compose.yaml is missing'
@@ -90,8 +126,8 @@ case "${OSTYPE:-}" in
     export MSYS_NO_PATHCONV=1
     ;;
 esac
-BACKUP_LEXICAL="$(realpath -m -s -- "$BACKUP_DIR")" || fail 'cannot normalize backup path'
-BACKUP_RESOLVED="$(realpath -m -- "$BACKUP_DIR")" || fail 'cannot resolve backup path'
+BACKUP_LEXICAL="$("$REALPATH_BIN" -m -s -- "$BACKUP_DIR")" || fail 'cannot normalize backup path'
+BACKUP_RESOLVED="$("$REALPATH_BIN" -m -- "$BACKUP_DIR")" || fail 'cannot resolve backup path'
 [[ "$BACKUP_LEXICAL" == "$BACKUP_RESOLVED" ]] || fail 'backup directory path must not contain symlinks'
 BACKUP_DIR="$BACKUP_RESOLVED"
 if [[ -f "$ENV_FILE" ]]; then
@@ -102,7 +138,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -z "$FILE_VOLUME" || "$FILE_VOLUME" == "$VOLUME" ]] || fail 'selected data volume differs from existing .env; refusing to switch databases'
   if [[ -n "$FILE_BACKUP" ]]; then
     [[ "$FILE_BACKUP" == /* ]] || fail 'existing .env backup path must be absolute'
-    FILE_BACKUP_RESOLVED="$(realpath -m -- "$FILE_BACKUP")" || fail 'cannot resolve existing .env backup path'
+    FILE_BACKUP_RESOLVED="$("$REALPATH_BIN" -m -- "$FILE_BACKUP")" || fail 'cannot resolve existing .env backup path'
     [[ "$FILE_BACKUP_RESOLVED" == "$BACKUP_DIR" ]] || fail 'selected backup directory differs from existing .env; preserve the configured backup target'
   fi
 fi
@@ -121,12 +157,12 @@ if (( BACKUP_DIR_CREATED )); then
     *)
       HOST_UID="$(id -u)"
       "$DOCKER_BIN" run --rm --network none --user 0:0 --mount "type=bind,source=$BACKUP_DIR,target=/backup" --env "HOST_UID=$HOST_UID" --entrypoint node node:24-bookworm-slim -e "import('node:fs/promises').then(async fs=>{if((await fs.readdir('/backup')).length)throw new Error('new backup directory is not empty');await fs.chown('/backup',Number(process.env.HOST_UID),1000);await fs.chmod('/backup',0o770)})" || fail 'cannot prepare new backup directory for the host user and container group 1000'
-      BACKUP_OWNER="$(stat -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect initialized backup directory ownership'
+      BACKUP_OWNER="$("$STAT_BIN" -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect initialized backup directory ownership'
       [[ "$BACKUP_OWNER" == "$HOST_UID:1000:770" ]] || fail 'new backup directory must remain host-owned and writable by container group 1000'
       ;;
   esac
 fi
-BACKUP_MODE="$(stat -c %a -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory mode'
+BACKUP_MODE="$("$STAT_BIN" -c %a -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory mode'
 if (( BACKUP_DIR_CREATED )); then
   case "${OSTYPE:-}" in
     msys*|cygwin*) ;;
@@ -136,7 +172,7 @@ else
   case "${OSTYPE:-}" in
     msys*|cygwin*) ;;
     *)
-      BACKUP_OWNER="$(stat -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory ownership'
+      BACKUP_OWNER="$("$STAT_BIN" -c '%u:%g:%a' -- "$BACKUP_DIR")" || fail 'cannot inspect backup directory ownership'
       [[ "$BACKUP_OWNER" == "$(id -u):1000:770" ]] || (( (8#$BACKUP_MODE & 0022) == 0 || (8#$BACKUP_MODE & 01000) != 0 )) || fail 'backup directory must not be group/world writable unless sticky-bit protected'
       ;;
   esac

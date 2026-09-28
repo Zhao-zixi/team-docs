@@ -43,7 +43,7 @@ bash deploy/source-up.sh \
 
 3. 首次启动后，在浏览器打开 `http://192.168.1.20:8080` 并完成下方初始设置。这个 HTTP 示例适合可信局域网测试；公开网络请配置 HTTPS，详见[部署指南](docs/DEPLOYMENT.md)。
 
-后续更新时，先在项目根目录获取新源码：Git 克隆方式使用 `git pull --ff-only`；若使用下载包，则下载新版并按[部署指南](docs/DEPLOYMENT.md)保留本地 `.env` 和数据卷。然后重复上面的启动命令，但去掉 `--init-volume`。不要更换项目名、卷名或删除数据卷。
+后续更新时，继续使用原项目名、数据卷和备份目录，去掉 `--init-volume`。Git 克隆的 `main` checkout 可在原部署命令上加 `--from-main`，让脚本安全快进到 `origin/main` 后升级；Windows PowerShell 对应加 `-FromMain`。该模式拒绝非 main、tracked 文件有修改、本地领先/分叉以及非快进更新。下载包用户需另行取得新版源码，不能使用此开关。`.sqlite` 升级快照不含 SMTP 密钥；升级前的数据保护与固定 digest 路径见[部署指南](docs/DEPLOYMENT.md)。不要更换项目名、卷名或删除数据卷。
 
 ## Windows 本机体验
 
