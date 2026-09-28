@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">TeamShelf 协作、审阅与资料室数据流</title>
+  <desc id="desc">浏览器和 Agent 通过同源 HTTP 与 WebSocket 使用同一 TeamShelf 服务端权限校验。正式 Markdown、Yjs 协作草稿和提案分别持久化于 SQLite；外部资料室只展示固定正式快照。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#557d69"/></marker>
+    <style>
+      text{font-family:Segoe UI,Arial,sans-serif;fill:#233a32}.title{font-size:25px;font-weight:700}.label{font-size:17px;font-weight:650}.small{font-size:13px;fill:#52665d}.box{fill:#fffefa;stroke:#bfd0c5;stroke-width:2}.accent{fill:#e9f2ec;stroke:#7c9e89;stroke-width:2}.warm{fill:#fff4e6;stroke:#e0b26c;stroke-width:2}.line{stroke:#557d69;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1120" height="560" rx="24" fill="#f7f6f1"/>
+  <text x="48" y="54" class="title">一个服务端边界，三种协作状态</text>
+  <rect x="48" y="110" width="230" height="115" rx="18" class="box"/><text x="163" y="153" text-anchor="middle" class="label">团队成员浏览器</text><text x="163" y="182" text-anchor="middle" class="small">登录会话 · HTTP / WebSocket</text>
+  <rect x="48" y="300" width="230" height="100" rx="18" class="box"/><text x="163" y="342" text-anchor="middle" class="label">Agent / MCP 客户端</text><text x="163" y="370" text-anchor="middle" class="small">个人凭据 · scope 与 ACL 交集</text>
+  <rect x="385" y="185" width="310" height="150" rx="22" class="accent"/><text x="540" y="232" text-anchor="middle" class="label">TeamShelf 服务端</text><text x="540" y="264" text-anchor="middle" class="small">身份、团队角色、空间/文档 ACL</text><text x="540" y="290" text-anchor="middle" class="small">版本检查 · 审批 · 当前权限复核</text>
+  <rect x="840" y="82" width="232" height="98" rx="18" class="box"/><text x="956" y="122" text-anchor="middle" class="label">正式文档</text><text x="956" y="151" text-anchor="middle" class="small">唯一正文快照：Markdown</text>
+  <rect x="840" y="232" width="232" height="98" rx="18" class="warm"/><text x="956" y="272" text-anchor="middle" class="label">协作草稿 / 提案</text><text x="956" y="301" text-anchor="middle" class="small">Yjs 持久状态 · 独立审批</text>
+  <rect x="840" y="382" width="232" height="98" rx="18" class="box"/><text x="956" y="422" text-anchor="middle" class="label">SQLite 持久卷</text><text x="956" y="451" text-anchor="middle" class="small">数据库备份 · 单写入实例</text>
+  <path d="M278 164 C325 164 334 220 385 230" class="line"/><path d="M278 350 C330 350 340 300 385 290" class="line"/>
+  <path d="M695 220 C750 190 780 145 840 135" class="line"/><path d="M695 258 L840 280" class="line"/><path d="M695 305 C755 335 786 414 840 427" class="line"/>
+  <path d="M956 382 L956 330" class="line"/>
+  <text x="540" y="450" text-anchor="middle" class="small">提案获批后才更新正式内容</text>
+  <text x="540" y="500" text-anchor="middle" class="small">外部资料室只向访客呈现所选已发布快照，并在凭据/ACL状态变化时失效</text>
+</svg>

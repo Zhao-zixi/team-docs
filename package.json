@@ -18,7 +18,7 @@
     "restore": "node scripts/restore.mjs",
     "test": "cross-env NODE_EXTRA_CA_CERTS=tests/fixtures/mail-smtp-test-ca.pem vitest run && node --test tests/ops/ops.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test tests/e2e/teamshelf.spec.ts && playwright test tests/e2e/rooms.spec.ts",
     "test:ops": "node --test tests/ops/ops.test.mjs",
     "dev:client": "vite --host 0.0.0.0",
     "mcp:stdio": "node dist/mcp/stdio.js",
