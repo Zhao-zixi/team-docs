@@ -16,6 +16,33 @@ beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),'teamshelf-rooms-'
 afterEach(async()=>{await app.close();db.close();await rm(root,{recursive:true,force:true});});
 
 describe('external rooms',()=>{
+ it('denies an existing public session after expiry, creator demotion, revocation, and physical document deletion',async()=>{
+  async function createSession(){
+   const created=await request('owner','POST','/api/teams/'+f.team+'/rooms',{name:'Lifecycle',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:f.doc,publishedVersion:1}]});
+   expect(created.statusCode).toBe(201);const {room,url}=created.json();const token=new URL(url).pathname.split('/').pop()!;
+   const login=await app.inject({method:'POST',url:'/api/share/'+token+'/session',headers:{origin:'http://localhost:5173','x-requested-with':'TeamShelf','content-type':'application/json'},payload:{password:'separate-room-secret'}});
+   expect(login.statusCode).toBe(200);return{room,token,cookie:String(login.headers['set-cookie']??'').split(';')[0]};
+  }
+  const first=await createSession();
+  db.prepare('UPDATE external_rooms SET expires_at=? WHERE id=?').run(new Date(Date.now()-1000).toISOString(),first.room.id);
+  expect((await app.inject({method:'GET',url:'/api/share/'+first.token+'/items',headers:{cookie:first.cookie}})).statusCode).toBe(404);
+  const second=await createSession();
+  db.prepare("UPDATE members SET role='editor' WHERE team_id=? AND user_id=?").run(f.team,f.owner);
+  expect((await app.inject({method:'GET',url:'/api/share/'+second.token+'/items',headers:{cookie:second.cookie}})).statusCode).toBe(404);
+  db.prepare("UPDATE members SET role='owner' WHERE team_id=? AND user_id=?").run(f.team,f.owner);
+  const third=await createSession();
+  expect((await request('owner','DELETE','/api/rooms/'+third.room.id)).statusCode).toBe(200);
+  expect((await app.inject({method:'GET',url:'/api/share/'+third.token+'/items',headers:{cookie:third.cookie}})).statusCode).toBe(404);
+  const fourth=await createSession();
+  db.prepare('DELETE FROM documents WHERE id=?').run(f.doc);
+  expect((await app.inject({method:'GET',url:'/api/share/'+fourth.token+'/documents/'+f.doc,headers:{cookie:fourth.cookie}})).statusCode).toBe(404);
+ }); it('keeps an independent low rate limit on password checks',async()=>{
+  const created=await request('owner','POST',`/api/teams/${f.team}/rooms`,{name:'Rate test',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:f.doc,publishedVersion:1}]});
+  expect(created.statusCode).toBe(201);const token=new URL(created.json().url).pathname.split('/').pop()!;
+  const statuses:number[]=[];
+  for(let i=0;i<6;i++)statuses.push((await app.inject({method:'POST',url:`/api/share/${token}/session`,headers:{origin:'http://localhost:5173','x-requested-with':'TeamShelf','content-type':'application/json'},payload:{password:'wrong-room-password'}})).statusCode);
+  expect(statuses.slice(0,5)).toEqual([403,403,403,403,403]);expect(statuses[5]).toBe(429);
+ });
  it('pins selected published snapshots, protects them with password sessions, and invalidates sessions on ACL change/rotation/removal',async()=>{
   expect((await request('viewer','GET',`/api/teams/${f.team}/rooms`)).statusCode).toBe(403);
   const created=await request('owner','POST',`/api/teams/${f.team}/rooms`,{name:'Partner pack',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:f.doc,publishedVersion:1}]});

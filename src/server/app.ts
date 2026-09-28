@@ -45,7 +45,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
 
   app.register(websocket, { options: { maxPayload: 128 * 1024 } });
   app.register(cookie);
-  app.register(rateLimit, { global: true, max: 120, timeWindow: 60_000 });
+  app.register(rateLimit, { global: true, max: 600, timeWindow: 60_000 });
   app.register(helmet, {
     frameguard: { action: 'deny' },
     hsts: config.appOrigin.startsWith('https://') ? { maxAge: 31_536_000 } : false,

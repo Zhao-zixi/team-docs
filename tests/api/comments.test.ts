@@ -15,6 +15,7 @@ const tokens: Record<string,string> = {};
 function addUser(id:string,name:string){db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)').run(id,`${name}@example.test`,`${name}@example.test`,name,'unused',isoNow());}
 function req(user:'owner'|'editor'|'viewer'|'stranger',method:'GET'|'POST'|'PATCH',url:string,payload?:unknown){const headers:Record<string,string>={cookie:`teamshelf_session=${tokens[user]}`};if(method!=='GET')headers['x-requested-with']='TeamShelf';if(payload!==undefined)headers['content-type']='application/json';return app.inject({method,url,headers,...(payload===undefined?{}:{payload:JSON.stringify(payload)})});}
 
+function agentReq(method:'GET'|'POST',url:string){return app.inject({method,url,headers:{authorization:'Bearer test-agent',accept:'application/json'}});}
 beforeEach(async()=>{
  root=await mkdtemp(path.join(os.tmpdir(),'teamshelf-comments-'));db=openDatabase(root);const now=isoNow();
  for(const [key,id] of Object.entries(u).filter(([key])=>['owner','editor','viewer','stranger'].includes(key)))addUser(id,key);
@@ -27,7 +28,7 @@ beforeEach(async()=>{
  db.prepare("INSERT INTO proposals(id,team_id,space_id,document_id,target_document_id,kind,author_id,base_version,title,body,status,created_at) VALUES(?,?,?,? ,?,'update',?,1,'Proposed title','Proposed body','pending',?)").run(u.proposal,u.team,u.space,u.doc,u.doc,u.editor,now);
  for(const [key,id] of Object.entries(u).filter(([key])=>['owner','editor','viewer','stranger'].includes(key))){const token=`comments-${key}-${randomUUID()}`;tokens[key]=token;db.prepare('INSERT INTO sessions(id,token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?,?)').run(randomUUID(),hashToken(token),id,now,new Date(Date.now()+86400000).toISOString());}
  const config={port:3000,dataDir:root,appOrigin:'http://localhost:5173',setupToken:'unused',cookieSecure:false,isProduction:false};
- app=Fastify({logger:false}); await app.register(cookie);
+ app=Fastify({logger:false}); await app.register(cookie); app.addHook('preHandler',async request=>{if(request.headers.authorization==='Bearer test-agent')request.agentPrincipal={userId:u.owner,credentialId:randomUUID(),teamId:u.team,spaceId:null,scope:'manage',teamRole:'owner'};});
  app.register(async api=>registerCommentRoutes(api,{db,config}),{prefix:'/api'}); await app.ready();
 });
 afterEach(async()=>{if(app)await app.close();db?.close();if(root)await rm(root,{recursive:true,force:true});});
@@ -70,6 +71,7 @@ describe('document comments and notifications',()=>{
   expect((await req('editor','POST',`/api/comments/${draft.json().comment.id}/replies`,{body:'too late',mentionUserIds:[]})).statusCode).toBe(403);
   const proposal=await req('editor','POST',`/api/documents/${u.doc}/comments`,{source:{kind:'proposal',proposalId:u.proposal},quote:'proposed text',anchor:{paragraphIndex:0,startOffset:0,endOffset:7},body:'Proposal note',mentionUserIds:[]});expect(proposal.statusCode).toBe(201);
   expect((await req('owner','GET',`/api/documents/${u.doc}/comments`)).json().comments.map((item:any)=>item.body)).toContain('Proposal note');
+  expect((await agentReq('GET','/api/documents/'+u.doc+'/comments')).json().comments.map((item:any)=>item.body)).not.toContain('Proposal note');
   expect((await req('viewer','GET',`/api/documents/${u.doc}/comments`)).json().comments.map((item:any)=>item.body)).not.toContain('Proposal note');
  });
 

@@ -46,13 +46,13 @@ function sourceFrom(row: Pick<CommentRow,'source_kind'|'source_version'|'source_
   if (row.source_kind === 'proposal' && row.source_proposal_id) return { kind: 'proposal', proposalId: row.source_proposal_id };
   throw new Error('Invalid comment source row');
 }
-function canReadProposal(db: AppContext['db'], userId: string, proposalId: string, documentId: string): boolean {
+function canReadProposal(db: AppContext['db'], userId: string, proposalId: string, documentId: string, agent: boolean): boolean {
   const row = db.prepare('SELECT p.author_id,p.team_id,p.space_id,p.target_document_id,p.document_id,m.role FROM proposals p LEFT JOIN members m ON m.team_id=p.team_id AND m.user_id=? WHERE p.id=?').get(userId, proposalId) as {author_id:string;team_id:string;space_id:string;target_document_id:string|null;document_id:string|null;role:TeamRole|null}|undefined;
-  if (!row || row.target_document_id !== documentId || (!isManager(row.role ?? undefined) && row.author_id !== userId)) return false;
+  if (!row || row.target_document_id !== documentId || (agent ? row.author_id !== userId : (!isManager(row.role ?? undefined) && row.author_id !== userId))) return false;
   if (isManager(row.role ?? undefined)) return Boolean(getDocumentAccess(db,userId,documentId)?.canManage);
   return Boolean(getDocumentAccess(db,userId,documentId)?.canRead);
 }
-function sourceState(db: AppContext['db'], userId: string, documentId: string, source: CommentSource, write: boolean): { stale: boolean } {
+function sourceState(db: AppContext['db'], userId: string, documentId: string, source: CommentSource, write: boolean, agent = false): { stale: boolean } {
   const access = getDocumentAccess(db, userId, documentId);
   if (!access?.canRead) throw notFound();
   if (write && !access.canEdit) throw forbidden();
@@ -68,7 +68,7 @@ function sourceState(db: AppContext['db'], userId: string, documentId: string, s
     if (write && draft.state !== 'editing') throw forbidden('送审后的草稿已冻结，请在提案上继续讨论。');
     return { stale: draft.seq !== source.seq || draft.state !== 'editing' };
   }
-  if (!canReadProposal(db, userId, source.proposalId, documentId)) throw notFound();
+  if (!canReadProposal(db, userId, source.proposalId, documentId, agent)) throw notFound();
   const proposal = db.prepare('SELECT status,base_version FROM proposals WHERE id=?').get(source.proposalId) as {status:string;base_version:number|null}|undefined;
   if (!proposal) throw notFound();
   if (write && proposal.status !== 'pending') throw forbidden('仅待审阅提案可添加评论。');
@@ -79,16 +79,16 @@ function sourceColumns(source: CommentSource) {
     draftId: source.kind === 'draft' ? source.draftId : null, seq: source.kind === 'draft' ? source.seq : null,
     proposalId: source.kind === 'proposal' ? source.proposalId : null };
 }
-function toComment(db: AppContext['db'], viewerId: string, row: CommentRow, children?: DocumentComment[]): DocumentComment {
+function toComment(db: AppContext['db'], viewerId: string, row: CommentRow, children?: DocumentComment[], agent = false): DocumentComment {
   const source = sourceFrom(row);
   return { id:row.id,documentId:row.document_id,parentId:row.parent_id,source,quote:row.quote,
     anchor:{paragraphIndex:row.paragraph_index,startOffset:row.start_offset,endOffset:row.end_offset},body:row.body,
     authorId:row.author_id,authorName:row.author_name,mentionUserIds:JSON.parse(row.mention_user_ids_json) as string[],
-    resolved:row.resolved===1,stale:sourceState(db,viewerId,row.document_id,source,false).stale,
+    resolved:row.resolved===1,stale:sourceState(db,viewerId,row.document_id,source,false,agent).stale,
     createdAt:row.created_at,updatedAt:row.updated_at,...(children ? { replies:children } : {}) };
 }
-function requireCommentAccess(db: AppContext['db'], userId: string, row: CommentRow, write: boolean): void {
-  sourceState(db,userId,row.document_id,sourceFrom(row),write);
+function requireCommentAccess(db: AppContext['db'], userId: string, row: CommentRow, write: boolean, agent = false): void {
+  sourceState(db,userId,row.document_id,sourceFrom(row),write,agent);
 }
 function validateMentions(db: AppContext['db'], actor: string, documentId: string, source: CommentSource, ids: string[]): void {
   for (const id of ids) {
@@ -105,38 +105,38 @@ function insertComment(db: AppContext['db'], input: { documentId:string;parentId
   for (const recipient of input.mentionUserIds) if (recipient !== input.authorId) db.prepare('INSERT OR IGNORE INTO comment_notifications(id,comment_id,recipient_id,created_at) VALUES(?,?,?,?)').run(randomUUID(),id,recipient,input.now);
   return id;
 }
-function hydrateThreads(db: AppContext['db'], userId: string, rows: CommentRow[]): DocumentComment[] {
-  return rows.filter(row => { try { requireCommentAccess(db,userId,row,false); return true; } catch { return false; } }).map(row => {
+function hydrateThreads(db: AppContext['db'], userId: string, rows: CommentRow[], agent = false): DocumentComment[] {
+  return rows.filter(row => { try { requireCommentAccess(db,userId,row,false,agent); return true; } catch { return false; } }).map(row => {
     const replies=db.prepare('SELECT c.*,u.name AS author_name FROM document_comments c JOIN users u ON u.id=c.author_id WHERE c.parent_id=? ORDER BY c.created_at,c.id').all(row.id) as CommentRow[];
-    const readable=replies.filter(reply => { try { requireCommentAccess(db,userId,reply,false); return true; } catch { return false; } });
-    return toComment(db,userId,row,readable.map(reply=>toComment(db,userId,reply)));
+    const readable=replies.filter(reply => { try { requireCommentAccess(db,userId,reply,false,agent); return true; } catch { return false; } });
+    return toComment(db,userId,row,readable.map(reply=>toComment(db,userId,reply,undefined,agent)),agent);
   });
 }
 
 export function registerCommentRoutes(app: FastifyInstance, { db }: AppContext): void {
-  app.get('/documents/:id/comments',{preValidation:validateParams(DocumentParams)},async request=>{
+  app.get('/documents/:id/comments',{config:{agentAccess:{scope:'read',operation:'comment.read',documentParam:'id',allowSpaceBound:true}},preValidation:validateParams(DocumentParams)},async request=>{
     const user=actorId(db,request);const {id}=request.params as z.infer<typeof DocumentParams>;
     if(!getDocumentAccess(db,user,id)?.canRead)throw notFound();
     const parsed=Page.safeParse(request.query);if(!parsed.success)throw badRequest('分页参数无效。');
     const rows=db.prepare('SELECT c.*,u.name AS author_name FROM document_comments c JOIN users u ON u.id=c.author_id WHERE c.document_id=? AND c.parent_id IS NULL ORDER BY c.created_at,c.id LIMIT ? OFFSET ?').all(id,parsed.data.limit+1,parsed.data.offset) as CommentRow[];
     const hasMore=rows.length>parsed.data.limit;const page=rows.slice(0,parsed.data.limit);
-    return {comments:hydrateThreads(db,user,page),hasMore,nextOffset:hasMore?parsed.data.offset+parsed.data.limit:null};
+    return {comments:hydrateThreads(db,user,page,Boolean(request.agentPrincipal)),hasMore,nextOffset:hasMore?parsed.data.offset+parsed.data.limit:null};
   });
-  app.post('/documents/:id/comments',{preValidation:[validateParams(DocumentParams),validateBody(CreateComment)]},async(request,reply)=>{
+  app.post('/documents/:id/comments',{config:{agentAccess:{scope:'write',operation:'comment.write',documentParam:'id',allowSpaceBound:true}},preValidation:[validateParams(DocumentParams),validateBody(CreateComment)]},async(request,reply)=>{
     const user=actorId(db,request);const {id}=request.params as z.infer<typeof DocumentParams>;const input=request.body as z.infer<typeof CreateComment>;
-    sourceState(db,user,id,input.source,true);validateMentions(db,user,id,input.source,input.mentionUserIds);
+    sourceState(db,user,id,input.source,true,Boolean(request.agentPrincipal));validateMentions(db,user,id,input.source,input.mentionUserIds);
     const now=isoNow();let commentId='';transaction(db,()=>{commentId=insertComment(db,{documentId:id,parentId:null,source:input.source,quote:input.quote,paragraphIndex:input.anchor.paragraphIndex,startOffset:input.anchor.startOffset,endOffset:input.anchor.endOffset,body:input.body,authorId:user,mentionUserIds:input.mentionUserIds,now});});
-    return reply.code(201).send({comment:toComment(db,user,getRow(db,commentId)!)});
+    return reply.code(201).send({comment:toComment(db,user,getRow(db,commentId)!,undefined,Boolean(request.agentPrincipal))});
   });
-  app.post('/comments/:threadId/replies',{preValidation:[validateParams(ThreadParams),validateBody(Reply)]},async(request,reply)=>{
+  app.post('/comments/:threadId/replies',{config:{agentAccess:{scope:'write',operation:'comment.write',commentParam:'threadId',allowSpaceBound:true}},preValidation:[validateParams(ThreadParams),validateBody(Reply)]},async(request,reply)=>{
     const user=actorId(db,request);const {threadId}=request.params as z.infer<typeof ThreadParams>;const root=getRow(db,threadId);
-    if(!root||root.parent_id!==null)throw notFound();requireCommentAccess(db,user,root,true);if(root.resolved)throw forbidden('已解决的讨论不能继续回复。');
+    if(!root||root.parent_id!==null)throw notFound();requireCommentAccess(db,user,root,true,Boolean(request.agentPrincipal));if(root.resolved)throw forbidden('已解决的讨论不能继续回复。');
     const source=sourceFrom(root);const input=request.body as z.infer<typeof Reply>;validateMentions(db,user,root.document_id,source,input.mentionUserIds);
     const now=isoNow();let id='';transaction(db,()=>{id=insertComment(db,{documentId:root.document_id,parentId:root.id,source,quote:root.quote,paragraphIndex:root.paragraph_index,startOffset:root.start_offset,endOffset:root.end_offset,body:input.body,authorId:user,mentionUserIds:input.mentionUserIds,now});});
-    return reply.code(201).send({comment:toComment(db,user,getRow(db,id)!)});
+    return reply.code(201).send({comment:toComment(db,user,getRow(db,id)!,undefined,Boolean(request.agentPrincipal))});
   });
-  app.patch('/comments/:threadId',{preValidation:[validateParams(ThreadParams),validateBody(Resolve)]},async request=>{
-    const user=actorId(db,request);const {threadId}=request.params as z.infer<typeof ThreadParams>;const root=getRow(db,threadId);if(!root||root.parent_id!==null)throw notFound();
+  app.patch('/comments/:threadId',{config:{agentAccess:{scope:'write',operation:'comment.write',commentParam:'threadId',allowSpaceBound:true}},preValidation:[validateParams(ThreadParams),validateBody(Resolve)]},async request=>{
+    const user=actorId(db,request);const {threadId}=request.params as z.infer<typeof ThreadParams>;const root=getRow(db,threadId);if(!root||root.parent_id!==null)throw notFound();if(request.agentPrincipal)requireCommentAccess(db,user,root,true,true);
     const access=getDocumentAccess(db,user,root.document_id);if(!access?.canRead)throw notFound();if(!access.canManage&&!(access.canEdit&&root.author_id===user))throw forbidden();
     const {resolved}=request.body as z.infer<typeof Resolve>;db.prepare('UPDATE document_comments SET resolved=?,updated_at=? WHERE id=? AND parent_id IS NULL').run(resolved?1:0,isoNow(),root.id);
     return {comment:toComment(db,user,getRow(db,root.id)!)};

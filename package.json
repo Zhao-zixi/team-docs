@@ -16,7 +16,7 @@
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "backup": "node scripts/backup.mjs",
     "restore": "node scripts/restore.mjs",
-    "test": "vitest run && node --test tests/ops/ops.test.mjs",
+    "test": "cross-env NODE_EXTRA_CA_CERTS=tests/fixtures/mail-smtp-test-ca.pem vitest run && node --test tests/ops/ops.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "test:e2e": "playwright test",
     "test:ops": "node --test tests/ops/ops.test.mjs",

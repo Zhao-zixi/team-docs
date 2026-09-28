@@ -27,7 +27,9 @@ const Decision = z.object({decision:z.enum(['approve','reject']),note:z.string()
 const ListQuery = z.object({status:z.enum(['pending','approved','rejected','withdrawn','conflicted']).optional(),mine:z.coerce.boolean().optional().default(false),offset:z.coerce.number().int().min(0).max(10000000).default(0),limit:z.coerce.number().int().min(1).max(100).default(100)}).strict();
 
 type ProposalRow = {id:string;team_id:string;space_id:string;document_id:string|null;target_document_id:string|null;kind:Proposal['kind'];author_id:string;author_name:string;base_version:number|null;title:string;body:string;visibility:'inherit'|'restricted';grants_json:string;source_draft_id:string|null;revision_id:string|null;status:Proposal['status'];reviewer_id:string|null;decision_note:string|null;created_at:string;decided_at:string|null};
-function audit(db:AppContext['db'],teamId:string,actorId:string,action:string,targetId:string,details:Record<string,unknown>={}):void{
+function reopenDraft(db:AppContext['db'],draftId:string|null,now:string):void{
+ if(draftId)db.prepare("UPDATE document_drafts SET state='editing',updated_at=? WHERE id=? AND state='reviewing'").run(now,draftId);
+}function audit(db:AppContext['db'],teamId:string,actorId:string,action:string,targetId:string,details:Record<string,unknown>={}):void{
  db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json) VALUES(?,?,?,'proposal.'||?,'proposal',?,?,?)`).run(randomUUID(),teamId,actorId,action,targetId,isoNow(),JSON.stringify(details));
 }
 function sessionActor(db:AppContext['db'],request:FastifyRequest):string{
@@ -87,9 +89,9 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   const isAuthor=row.author_id===userId;const manager=isManager((db.prepare('SELECT role FROM members WHERE team_id=? AND user_id=?').get(row.team_id,userId) as {role:TeamRole}|undefined)?.role??'viewer');
   if(!isAuthor&&!manager)throw notFound();if(manager)managerOnProposal(db,userId,row);else {if(!db.prepare('SELECT 1 FROM members WHERE team_id=? AND user_id=?').get(row.team_id,userId))throw notFound();if(row.document_id&&!getDocumentAccess(db,userId,row.document_id)?.canRead)throw notFound();if(!row.document_id&&!getSpaceAccess(db,userId,row.space_id)?.canRead)throw notFound();}return {proposal:toProposal(row)};
  });
- app.post('/proposals/:id/withdraw',{preValidation:validateParams(ProposalParams)},async(request)=>{
-  const userId=sessionActor(db,request);const {id}=request.params as z.infer<typeof ProposalParams>;const row=getProposal(db,id);if(!row||row.author_id!==userId)throw notFound();if(row.status!=='pending')throw conflict();
-  transaction(db,()=>{const result=db.prepare("UPDATE proposals SET status='withdrawn',decided_at=? WHERE id=? AND author_id=? AND status='pending'").run(isoNow(),id,userId);if(result.changes!==1)throw conflict();audit(db,row.team_id,userId,'withdraw',id,{kind:row.kind});});return {ok:true};
+ app.post('/proposals/:id/withdraw',{config:{agentAccess:{scope:'write',operation:'proposal.write',proposalParam:'id',allowSpaceBound:true}},preValidation:validateParams(ProposalParams)},async(request)=>{
+  const userId=request.agentPrincipal?.userId??sessionActor(db,request);const {id}=request.params as z.infer<typeof ProposalParams>;const row=getProposal(db,id);if(!row||row.author_id!==userId)throw notFound();if(row.status!=='pending')throw conflict();
+  transaction(db,()=>{const result=db.prepare("UPDATE proposals SET status='withdrawn',decided_at=? WHERE id=? AND author_id=? AND status='pending'").run(isoNow(),id,userId);if(result.changes!==1)throw conflict();reopenDraft(db,row.source_draft_id,isoNow());audit(db,row.team_id,userId,'withdraw',id,{kind:row.kind});});return {ok:true};
  });
  app.post('/proposals/:id/decision',{preValidation:[validateParams(ProposalParams),validateBody(Decision)]},async(request)=>{
   const reviewer=sessionActor(db,request);const {id}=request.params as z.infer<typeof ProposalParams>;const input=request.body as z.infer<typeof Decision>;const row=getProposal(db,id);if(!row)throw notFound();managerOnProposal(db,reviewer,row);if(row.author_id===reviewer)throw forbidden('提交者不能审批自己的提案。');if(row.status!=='pending')throw conflict();
@@ -97,15 +99,15 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   transaction(db,()=>{
    const fresh=getProposal(db,id);if(!fresh||fresh.status!=='pending')throw conflict();managerOnProposal(db,reviewer,fresh);if(fresh.author_id===reviewer)throw forbidden('提交者不能审批自己的提案。');
    const policy=db.prepare('SELECT require_review FROM spaces WHERE id=?').get(fresh.space_id) as {require_review:number}|undefined;
-   if(!policy||policy.require_review!==1){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='review_policy_disabled',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);conflicted=true;return;}
-   if(input.decision==='reject'){db.prepare("UPDATE proposals SET status='rejected',reviewer_id=?,decision_note=?,decided_at=? WHERE id=? AND status='pending'").run(reviewer,input.note??null,now,id);audit(db,fresh.team_id,reviewer,'reject',id,{kind:fresh.kind});return;}
+   if(!policy||policy.require_review!==1){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='review_policy_disabled',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);conflicted=true;return;}
+   if(input.decision==='reject'){db.prepare("UPDATE proposals SET status='rejected',reviewer_id=?,decision_note=?,decided_at=? WHERE id=? AND status='pending'").run(reviewer,input.note??null,now,id);reopenDraft(db,fresh.source_draft_id,now);audit(db,fresh.team_id,reviewer,'reject',id,{kind:fresh.kind});return;}
    const authorAccess=fresh.kind==='create'?getSpaceAccess(db,fresh.author_id,fresh.space_id):fresh.target_document_id?getDocumentAccess(db,fresh.author_id,fresh.target_document_id):undefined;
    const authorAllowed=Boolean(authorAccess&&(fresh.kind==='restore'||fresh.kind==='delete'?authorAccess.canManage:authorAccess.canEdit));
-   if(!authorAllowed){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='author_access_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);conflicted=true;return;}
+   if(!authorAllowed){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='author_access_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);conflicted=true;return;}
    if(fresh.kind==='create') assertGrantMembers(db,fresh.team_id,JSON.parse(fresh.grants_json) as Array<{userId:string;role:'viewer'|'editor'}>);
    if(fresh.kind!=='create'){
     const current=db.prepare('SELECT version FROM documents WHERE id=? AND space_id=?').get(fresh.target_document_id,fresh.space_id) as {version:number}|undefined;
-    if(!current||current.version!==fresh.base_version){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='base_version_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);audit(db,fresh.team_id,reviewer,'conflict',id,{kind:fresh.kind});conflicted=true;return;}
+    if(!current||current.version!==fresh.base_version){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='base_version_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);audit(db,fresh.team_id,reviewer,'conflict',id,{kind:fresh.kind});conflicted=true;return;}
    }
    if(fresh.kind==='create'){
     const documentId=randomUUID();db.prepare(`INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,?,?,1,?,?,?,?)`).run(documentId,fresh.space_id,fresh.title,fresh.body,fresh.visibility,fresh.author_id,fresh.created_at,reviewer,now);
@@ -115,7 +117,7 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
    } else {
     const current=db.prepare('SELECT version FROM documents WHERE id=?').get(fresh.target_document_id) as {version:number};const version=current.version+1;
     const changed=db.prepare('UPDATE documents SET title=?,body=?,version=?,updated_by=?,updated_at=? WHERE id=? AND version=?').run(fresh.title,fresh.body,version,reviewer,now,fresh.target_document_id,fresh.base_version);
-    if(changed.changes!==1){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='base_version_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);conflicted=true;return;}
+    if(changed.changes!==1){db.prepare("UPDATE proposals SET status='conflicted',reviewer_id=?,decision_note='base_version_changed',decided_at=? WHERE id=? AND status='pending'").run(reviewer,now,id);reopenDraft(db,fresh.source_draft_id,now);conflicted=true;return;}
     insertRevision(db,fresh.target_document_id!,version,fresh.title,fresh.body,reviewer,user.name,now);
    }
    db.prepare("UPDATE proposals SET status='approved',reviewer_id=?,decision_note=?,decided_at=? WHERE id=? AND status='pending'").run(reviewer,input.note??null,now,id);audit(db,fresh.team_id,reviewer,'approve',id,{kind:fresh.kind,documentId:fresh.target_document_id});

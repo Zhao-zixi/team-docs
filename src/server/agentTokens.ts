@@ -81,7 +81,7 @@ export function registerAgentCredentialRoutes(app: FastifyInstance, { db }: AppC
     return { credentials: rows.map((row) => toSummary(userId, actorRole, row)) };
   });
 
-  app.post('/agent-tokens', { preValidation: validateBody(CreateBody) }, async (request, reply) => {
+  app.post('/agent-tokens', { config: { rateLimit: { max: 10, timeWindow: 60_000 } }, preValidation: validateBody(CreateBody) }, async (request, reply) => {
     const userId = requireUserId(db, request);
     const input = request.body as z.infer<typeof CreateBody>;
     const role = roleFor(db, input.teamId, userId);

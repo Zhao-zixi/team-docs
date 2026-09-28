@@ -93,6 +93,19 @@ function bearer(token: string, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELET
 }
 
 describe('Agent credentials and REST bearer policy', () => {
+  it('allows ordinary read traffic beyond the old shared-IP threshold while separately throttling credential issuance', async () => {
+    const read = await issue('owner', { scope: 'read' });
+    for (let i = 0; i < 125; i++) {
+      const response = await bearer(read.token, 'GET', `/api/teams/${ids.team}/spaces`);
+      expect(response.statusCode).toBe(200);
+    }
+    let finalStatus = 0;
+    for (let i = 0; i < 10; i++) {
+      finalStatus = (await sessionRequest('owner', 'POST', '/api/agent-tokens', { name: `Throttle ${i}`, teamId: ids.team, scope: 'read' })).statusCode;
+      if (i < 9) expect(finalStatus).toBe(201);
+    }
+    expect(finalStatus).toBe(429);
+  });
   it('migrates a v1 database to the current schema idempotently without changing existing data', async () => {
     const migrationDir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-v1-'));
     const first = openDatabase(migrationDir);

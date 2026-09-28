@@ -118,14 +118,14 @@ export async function processReminderOutbox(context: AppContext, now = new Date(
 
 export function registerWorkflowRoutes(app: FastifyInstance, context: AppContext): void {
   const { db } = context;
-  app.get('/documents/:id/workflow', { preValidation: validateParams(DocumentParams) }, async request => {
-    const user = sessionUser(db, request);
+  app.get('/documents/:id/workflow', { config:{agentAccess:{scope:'read',operation:'document.read',documentParam:'id',allowSpaceBound:true}}, preValidation: validateParams(DocumentParams) }, async request => {
+    const user = request.agentPrincipal?.userId ?? sessionUser(db, request);
     const { id } = request.params as z.infer<typeof DocumentParams>;
     if (!getDocumentAccess(db, user, id)?.canRead) throw notFound();
     return { workflow: workflowDto(db, id) };
   });
-  app.patch('/documents/:id/workflow', { preValidation: [validateParams(DocumentParams), validateBody(WorkflowBody)] }, async request => {
-    const user = sessionUser(db, request);
+  app.patch('/documents/:id/workflow', { config:{agentAccess:{scope:'manage',operation:'document.manage',documentParam:'id',allowSpaceBound:true}}, preValidation: [validateParams(DocumentParams), validateBody(WorkflowBody)] }, async request => {
+    const user = request.agentPrincipal?.userId ?? sessionUser(db, request);
     const { id } = request.params as z.infer<typeof DocumentParams>;
     const access = getDocumentAccess(db, user, id);
     if (!access) throw notFound();
@@ -149,8 +149,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, context: AppContext
     });
     return { workflow: workflowDto(db, id) };
   });
-  app.post('/documents/:id/workflow/mark-reviewed', { preValidation: [validateParams(DocumentParams), validateBody(z.object({ metadataVersion: z.number().int().nonnegative() }).strict())] }, async request => {
-    const user = sessionUser(db, request);
+  app.post('/documents/:id/workflow/mark-reviewed', { config:{agentAccess:{scope:'write',operation:'document.write',documentParam:'id',allowSpaceBound:true}}, preValidation: [validateParams(DocumentParams), validateBody(z.object({ metadataVersion: z.number().int().nonnegative() }).strict())] }, async request => {
+    const user = request.agentPrincipal?.userId ?? sessionUser(db, request);
     const { id } = request.params as z.infer<typeof DocumentParams>;
     const access = getDocumentAccess(db, user, id);
     if (!access) throw notFound();
@@ -194,4 +194,3 @@ export function registerWorkflowRoutes(app: FastifyInstance, context: AppContext
   timer.unref();
   app.addHook('onClose', async () => clearInterval(timer));
 }
-
