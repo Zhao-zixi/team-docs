@@ -8,6 +8,10 @@ const adminEmail = "owner-e2e@example.test";
 const adminPassword = "Teamshelf-Test-Password-2026!";
 const viewerPassword = "窗边纸船绕过深蓝群岛抵达星河2047";
 let activeMailSink: LocalTlsSmtpSink | undefined;
+async function enterDocumentEdit(page: Page) {
+  const button = page.getByRole("button", { name: "编辑文档" });
+  if (await button.count()) await button.click();
+}
 test.afterEach(async () => { await activeMailSink?.close(); activeMailSink = undefined; });
 
 async function waitForNewDocumentUrl(page: Page, previousId: string | null): Promise<string> {
@@ -119,6 +123,32 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await createDialog.getByLabel("Markdown 正文").fill("# 团队说明\n\n欢迎来到知屿。\n\n- 协作\n- 沉淀\n");
   await createDialog.getByRole("button", { name: "创建文档" }).click();
   await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.locator(".edit-preview")).toBeVisible();
+  await page.screenshot({ path: "test-results/screenshots/document-edit-preview-desktop.png" });
+  await page.setViewportSize({ width: 375, height: 812 });
+  const closeMobileSidebar = page.getByRole("button", { name: "关闭导航" });
+  if (await closeMobileSidebar.isVisible()) await closeMobileSidebar.click();
+  await expect.poll(async () => { const box = await page.locator(".sidebar").boundingBox(); return box ? box.x + box.width : 0; }).toBeLessThanOrEqual(0);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  for (const label of ["关闭预览", "返回查看", "段落评论", "协作草稿"]) {
+    const action = page.getByRole("button", { name: label, exact: true });
+    await expect(action).toBeVisible();
+    await expect(action.locator("svg")).toBeVisible();
+  }
+  await page.getByRole("button", { name: "关闭预览" }).click();
+  await expect(page.locator(".edit-preview")).toBeHidden();
+  await page.getByRole("button", { name: "打开预览" }).click();
+  await expect(page.locator(".edit-preview")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  await page.screenshot({ path: "test-results/screenshots/document-edit-preview-mobile-375.png" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "关闭预览" }).click();
+  await expect(page.locator(".edit-preview")).toBeHidden();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await page.getByRole("button", { name: "打开预览" }).click();
+  await page.getByRole("button", { name: "返回查看" }).click();
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await enterDocumentEdit(page);
   await expect(page).toHaveURL(/doc=[0-9a-f-]+/);
   const publicDocId = new URL(page.url()).searchParams.get("doc");
   const teamId = new URL(page.url()).searchParams.get("team");
@@ -131,13 +161,32 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await editor.click(); await page.keyboard.press("End"); await page.keyboard.type(" 安全编辑");
   await page.getByRole("button", { name: "粗体" }).click(); await page.keyboard.type("工具栏加粗");
   await page.getByRole("button", { name: "保存", exact: true }).click();
-  await expect(page.getByText(/已保存 · v2/)).toBeVisible();
+  await expect(page.getByText(/已保存版本 · v2/)).toBeVisible();
   const saved = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, publicDocId);
   expect(saved.body).toContain("安全编辑");
   expect(saved.body).toContain("**工具栏加粗**");
   await page.reload();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await expect(page.getByLabel("文档标题")).toHaveCount(0);
   await expect(page.locator(".markdown-preview")).toContainText("安全编辑");
+  await page.screenshot({ path: "test-results/screenshots/document-view-desktop.png" });
+  await enterDocumentEdit(page);
+  const restoredPublished = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, publicDocId);
+  const reviewDraft = page.getByLabel("Markdown 正文");
+  await reviewDraft.fill(restoredPublished.body + "\n\n未提交草稿演示");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "返回查看" }).click();
+  await expect(page.getByLabel("Markdown 正文")).toHaveValue(/未提交草稿演示/);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "返回查看" }).click();
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await expect(page.locator(".markdown-preview")).not.toContainText("未提交草稿演示");
+  await expect(page.getByRole("button", { name: "继续编辑草稿" })).toBeVisible();
+  await page.getByRole("button", { name: "继续编辑草稿" }).click();
+  await expect(page.getByLabel("Markdown 正文")).toHaveValue(/未提交草稿演示/);
+  await page.getByLabel("Markdown 正文").fill(restoredPublished.body);
+  await page.getByRole("button", { name: "返回查看" }).click();
+  await expect(page.getByRole("button", { name: "编辑文档" })).toBeVisible();
 
   // Put the parent beyond the first REST page and verify the UI fetches the complete tree.
   const paginationRequests: number[] = [];
@@ -154,7 +203,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   }, spaceId);
   expect(fillerResult).toEqual({ status: 201, index: 100 });
   await page.reload();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await expect.poll(() => page.locator(".document-link").count()).toBe(101);
   expect(paginationRequests).toContain(0);
   expect(paginationRequests).toContain(100);
@@ -168,24 +217,25 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.locator("#team-sidebar-content")).toBeHidden();
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => Boolean(document.activeElement?.closest("#team-sidebar-content, #document-navigation-content")))).toBe(false);
-  await expect(page.getByLabel("Markdown 正文")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await documentRailToggle.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "展开文档列表" })).toBeVisible();
   await expect(page.locator("#document-navigation-content")).toBeHidden();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await page.screenshot({ path: "test-results/screenshots/sidebars-collapsed-desktop.png" });
   await page.reload();
   await expect(page.getByRole("button", { name: "展开团队侧栏" })).toBeVisible();
   await expect(page.getByRole("button", { name: "展开文档列表" })).toBeVisible();
   await expect(page.locator("#team-sidebar-content")).toBeHidden();
   await expect(page.locator("#document-navigation-content")).toBeHidden();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await page.getByRole("button", { name: "展开团队侧栏" }).click();
   await page.getByRole("button", { name: "展开文档列表" }).click();
   await expect(page.getByRole("button", { name: "折叠团队侧栏" })).toBeVisible();
   await expect(page.getByRole("button", { name: "折叠文档列表" })).toBeVisible();
 
+  await enterDocumentEdit(page);
   const markdownField = page.getByLabel("Markdown 正文");
   await markdownField.evaluate(element => { const field = element as HTMLTextAreaElement; field.setSelectionRange(0, 5); field.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })); });
   await page.getByRole("button", { name: "段落评论" }).click();
@@ -268,7 +318,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.locator(".document-link").filter({ hasText: childTitle })).toHaveCount(0);
 
   await reviewerPage.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
-  await expect(reviewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(reviewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await reviewerPage.getByRole("button", { name: "提案审阅" }).click();
   const childReviewPanel = reviewerPage.getByRole("region", { name: "提案审阅" });
   await childReviewPanel.getByRole("button", { name: new RegExp(childTitle) }).click();
@@ -276,7 +326,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(childProposalDetail.getByText("父文档：团队公开说明")).toBeVisible();
   await childProposalDetail.getByRole("button", { name: "批准提案" }).click();
   await page.reload();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   const parentTreeRow = page.locator(".document-link").filter({ hasText: "团队公开说明" });
   const childTreeRow = page.locator(".document-link").filter({ hasText: childTitle });
   await expect(parentTreeRow).toHaveAttribute("data-document-depth", "0");
@@ -299,6 +349,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await page.getByRole("button", { name: "删除文档" }).click();
   await expect(page.locator(".toast[role=status]")).toContainText("包含 1 个子文档，不能删除");
 
+  await enterDocumentEdit(page);
   const proposalEditor = page.getByLabel("Markdown 正文");
   await proposalEditor.fill((await proposalEditor.inputValue()) + "\n\n提交审核的内容");
   await page.getByRole("button", { name: "保存", exact: true }).click();
@@ -307,7 +358,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   expect(pendingPublished.body).not.toContain("提交审核的内容");
 
   await reviewerPage.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
-  await expect(reviewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(reviewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await reviewerPage.getByRole("button", { name: "提案审阅" }).click();
   const reviewPanel = reviewerPage.getByRole("region", { name: "提案审阅" });
   await expect(reviewPanel.getByRole("heading", { name: "提案审阅" })).toBeVisible();
@@ -325,6 +376,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await disableReviewDialog.getByRole("button", { name: "保存规则" }).click();
   await expect(page.locator(".toast[role=status]")).toContainText("已关闭提交审阅");
   // Two real browser sessions edit both supported collaborative modes. Fast typing must not hit the WS frame limit.
+  await enterDocumentEdit(page);
   await page.getByRole("button", { name: "协作草稿" }).click();
   let collab = page.getByRole("dialog", { name: "多人协作草稿" });
   await collab.getByRole("button", { name: "创建 Markdown 协作草稿" }).click();
@@ -332,7 +384,9 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await page.screenshot({ path: "docs/images/teamshelf-collaboration-demo.png", animations: "disabled" });
   await expect(collab.locator(".collab-source-editor")).toBeVisible({ timeout: 10000 });
   await reviewerPage.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
-  await expect(reviewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(reviewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await enterDocumentEdit(reviewerPage);
+  await enterDocumentEdit(reviewerPage);
   await reviewerPage.getByRole("button", { name: "协作草稿" }).click();
   const reviewerCollab = reviewerPage.getByRole("dialog", { name: "多人协作草稿" });
   await expect(reviewerCollab.locator(".collab-editor [role=status]")).toContainText("已连接", { timeout: 15000 });
@@ -363,12 +417,14 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await collab.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(reviewerPage.getByRole("dialog", { name: "多人协作草稿" })).toHaveCount(0);
 
+  await enterDocumentEdit(page);
   await page.getByRole("button", { name: "协作草稿" }).click();
   collab = page.getByRole("dialog", { name: "多人协作草稿" });
   await collab.getByRole("button", { name: "创建富文本协作草稿" }).click();
   await expect(collab.locator(".collab-editor [role=status]")).toContainText("已连接", { timeout: 15000 });
   await page.screenshot({ path: "docs/images/teamshelf-collaboration-demo.png", animations: "disabled" });
   await expect(collab.locator(".collab-rich-editor")).toBeVisible({ timeout: 10000 });
+  await enterDocumentEdit(reviewerPage);
   await reviewerPage.getByRole("button", { name: "协作草稿" }).click();
   const reviewerRichCollab = reviewerPage.getByRole("dialog", { name: "多人协作草稿" });
   await expect(reviewerRichCollab.locator(".collab-editor [role=status]")).toContainText("已连接", { timeout: 15000 });
@@ -529,12 +585,21 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await page.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
   const publicUrl = `/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`;
   await viewerPage.goto(publicUrl);
-  await expect(viewerPage.getByLabel("文档标题")).toHaveValue("团队公开说明");
-  await expect(viewerPage.getByLabel("Markdown 正文")).toBeDisabled();
+  await expect(viewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await expect(viewerPage.getByRole("button", { name: "编辑文档" })).toHaveCount(0);
+  await expect(viewerPage.getByRole("button", { name: "继续编辑草稿" })).toHaveCount(0);
+  await expect(viewerPage.getByLabel("Markdown 正文")).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "新建子文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "新建文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "保存", exact: true })).toHaveCount(0);
   await expect(viewerPage.locator(".markdown-preview")).toContainText("安全编辑");
+  const viewerId = await viewerPage.evaluate(async () => (await (await fetch("/api/auth/me", { credentials: "same-origin" })).json()).user.id as string);
+  await viewerPage.evaluate(({ userId, documentId }) => sessionStorage.setItem(`teamshelf:draft:${userId}:${documentId}`, JSON.stringify({ title: "只读不可见草稿标题", body: "只读不可见草稿正文" })), { userId: viewerId, documentId: publicDocId! });
+  await viewerPage.reload();
+  await expect(viewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await expect(viewerPage.getByText("此设备存在未发布草稿，但当前账号没有编辑权限；草稿内容不会显示。", { exact: true })).toBeVisible();
+  await expect(viewerPage.getByText("只读不可见草稿正文", { exact: true })).toHaveCount(0);
+  await expect(viewerPage.getByRole("button", { name: "继续编辑草稿" })).toHaveCount(0);
   await viewerPage.screenshot({ path: "test-results/teamshelf-desktop.png", fullPage: true });
   await viewerPage.setViewportSize({ width: 375, height: 812 });
   const openMobileNav = viewerPage.getByRole("button", { name: "打开团队侧栏" });
@@ -555,11 +620,11 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(mobileDocToggle).toBeVisible();
   await mobileDocToggle.click();
   await expect(viewerPage.locator(".doc-nav")).toBeVisible();
-  await expect(viewerPage.getByLabel("文档标题")).toBeHidden();
+  await expect(viewerPage.locator(".published-title")).toBeHidden();
   await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await viewerPage.screenshot({ path: "test-results/screenshots/document-list-mobile-375.png" });
   await viewerPage.getByRole("button", { name: "返回文档正文" }).click();
-  await expect(viewerPage.getByLabel("文档标题")).toBeVisible();
+  await expect(viewerPage.locator(".published-title")).toBeVisible();
   await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await viewerPage.screenshot({ path: "test-results/teamshelf-mobile-375.png", fullPage: true });
 
@@ -579,7 +644,8 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   expect(forbidden).toBe(404);
 
   await page.goto(publicUrl);
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await enterDocumentEdit(page);
   await page.getByRole("tab", { name: "源码" }).click();
   const source = page.getByLabel("Markdown 正文");
   await source.fill("# 本地草稿\n\n保留在浏览器会话中。\n");
@@ -596,7 +662,10 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
 
   page.once("dialog", dialog => dialog.accept());
   await page.reload();
-  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await expect(page.getByText("此设备保存有未发布的本地草稿。查看内容仍是已发布版本。", { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Markdown 正文")).toHaveCount(0);
+  await page.getByRole("button", { name: "继续编辑草稿" }).click();
   await expect(page.getByLabel("Markdown 正文")).toHaveValue(/本地草稿/);
   await expect(page).toHaveURL(new RegExp(`doc=${publicDocId}`));
   let releaseDelayed!: () => void;
