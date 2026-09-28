@@ -179,6 +179,24 @@ describe('content and ACL API', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM documents WHERE title=?').get('Pending child')).toEqual({ count: 0 });
   });
 
+  it('denies corrupted cyclic, missing-parent and cross-space ancestor chains', async () => {
+    const parent = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Chain root' });
+    const parentId = parent.json().document.id as string;
+    const child = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Chain child', parentId });
+    const childId = child.json().document.id as string;
+
+    db.prepare('UPDATE documents SET parent_id=? WHERE id=?').run(childId, parentId);
+    expect((await request('owner', 'GET', `/api/documents/${childId}`)).statusCode).toBe(404);
+    db.prepare('UPDATE documents SET parent_id=NULL WHERE id=?').run(parentId);
+
+    db.prepare('UPDATE documents SET parent_id=? WHERE id=?').run(f.nested, childId);
+    expect((await request('owner', 'GET', `/api/documents/${childId}`)).statusCode).toBe(404);
+    db.exec('PRAGMA foreign_keys=OFF');
+    db.prepare('UPDATE documents SET parent_id=? WHERE id=?').run(randomUUID(), childId);
+    db.exec('PRAGMA foreign_keys=ON');
+    expect((await request('owner', 'GET', `/api/documents/${childId}`)).statusCode).toBe(404);
+  });
+
   it('filters spaces and documents by the shared layered ACL, including cross-team isolation', async () => {
     const ownerSpaces = await request('owner', 'GET', `/api/teams/${f.team}/spaces`);
     expect(ownerSpaces.statusCode).toBe(200);
