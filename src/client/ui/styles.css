@@ -22,3 +22,5 @@
 .collab-rebase h3, .collab-rebase p { margin: 0; }
 .collab-rebase .review-diff { max-height: 18rem; overflow: auto; }
 @media (max-width: 600px) { .collab-rebase { padding: 0.75rem; } .collab-rebase .review-diff { grid-template-columns: minmax(0,1fr); } .collab-rebase .secondary-button { width: 100%; white-space: normal; } }
+
+.workflow-page{padding-top:0;padding-bottom:32px}@media(max-width:600px){.workflow-dates{grid-template-columns:minmax(0,1fr)}}
