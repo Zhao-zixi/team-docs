@@ -135,7 +135,7 @@ export interface DocumentComment {
 }
 export interface DocumentWorkflow {
   documentId: string; responsibleUserId: string | null; responsibleName: string | null;
-  reviewAt: string | null; dueAt: string | null; status: 'draft' | 'in_review' | 'published'; metadataVersion: number;
+  reviewAt: string | null; lastReviewedAt: string | null; dueAt: string | null; status: 'draft' | 'in_review' | 'published'; metadataVersion: number;
 }
 export interface TeamReminderSettings { enabled: boolean; senderUserId: string | null }
 export interface ExternalRoomSummary {

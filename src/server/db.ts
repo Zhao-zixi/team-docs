@@ -115,7 +115,7 @@ export function openDatabase(dataDir: string): Db {
 
   `);
   const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (currentVersion > 5) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
+  if (currentVersion > 8) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
   if (currentVersion < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tokens (
@@ -217,6 +217,129 @@ export function openDatabase(dataDir: string): Db {
       CREATE INDEX IF NOT EXISTS proposals_author_idx ON proposals(author_id,status,created_at DESC);
       CREATE INDEX IF NOT EXISTS proposals_document_idx ON proposals(target_document_id,created_at DESC);
       PRAGMA user_version = 5;
+    `);
+  }
+  if (currentVersion < 6) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS document_comments (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        parent_id TEXT REFERENCES document_comments(id) ON DELETE CASCADE,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('published','draft','proposal')),
+        source_version INTEGER,
+        source_draft_id TEXT REFERENCES document_drafts(id) ON DELETE CASCADE,
+        source_seq INTEGER,
+        source_proposal_id TEXT REFERENCES proposals(id) ON DELETE CASCADE,
+        quote TEXT NOT NULL,
+        paragraph_index INTEGER NOT NULL CHECK (paragraph_index >= 0),
+        start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+        end_offset INTEGER NOT NULL CHECK (end_offset >= start_offset),
+        body TEXT NOT NULL,
+        author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mention_user_ids_json TEXT NOT NULL DEFAULT '[]',
+        resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (source_kind='published' AND source_version IS NOT NULL AND source_draft_id IS NULL AND source_seq IS NULL AND source_proposal_id IS NULL) OR
+          (source_kind='draft' AND source_version IS NULL AND source_draft_id IS NOT NULL AND source_seq IS NOT NULL AND source_proposal_id IS NULL) OR
+          (source_kind='proposal' AND source_version IS NULL AND source_draft_id IS NULL AND source_seq IS NULL AND source_proposal_id IS NOT NULL)
+        )
+      );
+      CREATE INDEX IF NOT EXISTS document_comments_doc_thread_idx ON document_comments(document_id,parent_id,created_at,id);
+      CREATE TABLE IF NOT EXISTS comment_notifications (
+        id TEXT PRIMARY KEY,
+        comment_id TEXT NOT NULL REFERENCES document_comments(id) ON DELETE CASCADE,
+        recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        read_at TEXT,
+        UNIQUE(comment_id,recipient_id)
+      );
+      CREATE INDEX IF NOT EXISTS comment_notifications_recipient_idx ON comment_notifications(recipient_id,created_at DESC,id);
+      PRAGMA user_version = 6;
+    `);
+  }
+  if (currentVersion < 7) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS document_workflow (
+        document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+        responsible_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        review_at TEXT,
+        last_reviewed_at TEXT,
+        due_at TEXT,
+        metadata_version INTEGER NOT NULL DEFAULT 0 CHECK (metadata_version >= 0),
+        updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS team_reminders (
+        team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+        sender_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS reminder_outbox (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('review','due')),
+        due_at TEXT NOT NULL,
+        recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','cancelled')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_attempt_at TEXT NOT NULL,
+        claimed_at TEXT,
+        sent_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(document_id,kind,due_at,recipient_id)
+      );
+      CREATE INDEX IF NOT EXISTS reminder_outbox_due_idx ON reminder_outbox(status,next_attempt_at,created_at);
+      PRAGMA user_version = 7;
+    `);
+  }
+  if (currentVersion < 8) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS external_rooms (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        session_generation INTEGER NOT NULL DEFAULT 1 CHECK (session_generation > 0),
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        rotated_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS external_rooms_team_idx ON external_rooms(team_id,created_at DESC,id);
+      CREATE TABLE IF NOT EXISTS external_room_items (
+        room_id TEXT NOT NULL REFERENCES external_rooms(id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        published_version INTEGER NOT NULL CHECK (published_version > 0),
+        title_snapshot TEXT NOT NULL,
+        body_snapshot TEXT NOT NULL,
+        acl_fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(room_id,document_id)
+      );
+      CREATE TABLE IF NOT EXISTS external_room_sessions (
+        token_hash TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES external_rooms(id) ON DELETE CASCADE,
+        session_generation INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS external_room_sessions_room_idx ON external_room_sessions(room_id,expires_at);
+      CREATE TABLE IF NOT EXISTS external_room_access_logs (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES external_rooms(id) ON DELETE CASCADE,
+        document_id TEXT,
+        outcome TEXT NOT NULL CHECK (outcome IN ('session_created','items_viewed','document_viewed')),
+        accessed_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS external_room_access_idx ON external_room_access_logs(room_id,accessed_at DESC,id);
+      PRAGMA user_version = 8;
     `);
   }
   return db;
