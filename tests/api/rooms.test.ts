@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,42 @@ beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),'teamshelf-rooms-'
 afterEach(async()=>{await app.close();db.close();await rm(root,{recursive:true,force:true});});
 
 describe('external rooms',()=>{
+ it('preserves existing root-document share fingerprints when migrating v8 to v9',async()=>{
+  const created=await request('owner','POST',`/api/teams/${f.team}/rooms`,{name:'Legacy root pack',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:f.doc,publishedVersion:1}]});
+  expect(created.statusCode).toBe(201);const {room,url}=created.json();const token=new URL(url).pathname.split('/').pop()!;
+  const login=await app.inject({method:'POST',url:`/api/share/${token}/session`,headers:{origin:'http://localhost:5173','x-requested-with':'TeamShelf','content-type':'application/json'},payload:{password:'separate-room-secret'}});
+  expect(login.statusCode).toBe(200);const cookie=String(login.headers['set-cookie']??'').split(';')[0];
+  const stored=(db.prepare('SELECT acl_fingerprint FROM external_room_items WHERE room_id=? AND document_id=?').get(room.id,f.doc) as {acl_fingerprint:string}).acl_fingerprint;
+  const legacyRow=db.prepare('SELECT d.visibility AS doc_visibility,s.visibility AS space_visibility,d.space_id,s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?').get(f.doc);
+  const spaces=db.prepare('SELECT user_id,role FROM space_grants WHERE space_id=? ORDER BY user_id,role').all(f.space);
+  const docs=db.prepare('SELECT user_id,role FROM document_grants WHERE document_id=? ORDER BY user_id,role').all(f.doc);
+  const members=db.prepare('SELECT user_id,role FROM members WHERE team_id=? ORDER BY user_id,role').all(f.team);
+  const legacy= createHash('sha256').update(JSON.stringify([legacyRow,spaces,docs,members])).digest('hex');
+  expect(stored).toBe(legacy);
+
+  await app.close();
+  db.exec('DROP INDEX documents_parent_idx; DROP INDEX proposals_parent_idx; ALTER TABLE documents DROP COLUMN parent_id; ALTER TABLE proposals DROP COLUMN parent_id; PRAGMA user_version=8;');
+  db.close();db=openDatabase(root);
+  expect((db.prepare('PRAGMA user_version').get() as {user_version:number}).user_version).toBe(9);
+  app=createApp({db,config:{port:3000,dataDir:root,appOrigin:'http://localhost:5173',setupToken:'unused',cookieSecure:false,isProduction:false},logger:false,serveClient:false});await app.ready();
+  const after=await app.inject({method:'GET',url:`/api/share/${token}/documents/${f.doc}`,headers:{cookie}});
+  expect(after.statusCode).toBe(200);expect(after.json().document).toEqual({title:'Pinned title',body:'Pinned body'});
+ });
+
+ it('invalidates a child snapshot when an ancestor ACL changes',async()=>{
+  const child=await request('owner','POST',`/api/spaces/${f.space}/documents`,{title:'Child snapshot',body:'pinned child',parentId:f.doc});
+  expect(child.statusCode).toBe(201);const childId=child.json().document.id as string;
+  const created=await request('owner','POST',`/api/teams/${f.team}/rooms`,{name:'Child pack',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:childId,publishedVersion:1}]});
+  expect(created.statusCode).toBe(201);const {room,url}=created.json();const token=new URL(url).pathname.split('/').pop()!;
+  const login=await app.inject({method:'POST',url:`/api/share/${token}/session`,headers:{origin:'http://localhost:5173','x-requested-with':'TeamShelf','content-type':'application/json'},payload:{password:'separate-room-secret'}});
+  expect(login.statusCode).toBe(200);const cookie=String(login.headers['set-cookie']??'').split(';')[0];
+  const before=await app.inject({method:'GET',url:`/api/share/${token}/documents/${childId}`,headers:{cookie}});expect(before.statusCode).toBe(200);
+  db.prepare("UPDATE documents SET visibility='restricted' WHERE id=?").run(f.doc);
+  expect((await app.inject({method:'GET',url:`/api/share/${token}/items`,headers:{cookie}})).json().documents).toEqual([]);
+  expect((await app.inject({method:'GET',url:`/api/share/${token}/documents/${childId}`,headers:{cookie}})).statusCode).toBe(404);
+  expect(room.itemCount).toBe(1);
+ });
+
  it('denies an existing public session after expiry, creator demotion, revocation, and physical document deletion',async()=>{
   async function createSession(){
    const created=await request('owner','POST','/api/teams/'+f.team+'/rooms',{name:'Lifecycle',expiresAt:new Date(Date.now()+86400000).toISOString(),password:'separate-room-secret',items:[{documentId:f.doc,publishedVersion:1}]});

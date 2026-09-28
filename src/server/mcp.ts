@@ -91,8 +91,8 @@ export function createTeamShelfMcpHandler(options: {
   const scope = ['read', 'write', 'manage'].indexOf(principal.scope) <= ['read', 'write', 'manage'].indexOf(effective) ? principal.scope : effective;
   if (scope === 'write' || scope === 'manage') {
     register('create_document', '在知识库中创建 Markdown 文档。权限默认为继承知识库。', {
-      spaceId: Id, title: nonEmpty.max(200), markdown: z.string().max(500 * 1024).optional(),
-    }, ({ spaceId, title, markdown }) => run('POST', `/spaces/${spaceId}/documents`, { title, body: markdown ?? '', visibility: 'inherit', grants: [] }));
+      spaceId: Id, parentId: Id.optional(), title: nonEmpty.max(200), markdown: z.string().max(500 * 1024).optional(),
+    }, ({ spaceId, parentId, title, markdown }) => run('POST', `/spaces/${spaceId}/documents`, { title, body: markdown ?? '', parentId, visibility: 'inherit', grants: [] }));
     register('update_document', '更新文档标题和 Markdown 正文，必须提供当前版本号。', {
       documentId: Id, title: nonEmpty.max(200), markdown: z.string().max(500 * 1024), version: z.number().int().positive(),
     }, ({ documentId, title, markdown, version }) => run('PATCH', `/documents/${documentId}`, { title, body: markdown, version }));
@@ -103,7 +103,7 @@ export function createTeamShelfMcpHandler(options: {
       z.object({ kind:z.literal('draft'), draftId:Id, seq:z.number().int().nonnegative() }).strict(),
       z.object({ kind:z.literal('proposal'), proposalId:Id }).strict(),
     ]);
-    register('propose_document_create', '在启用复核的知识库提交新文档提案；不会直接创建正式文档。', { spaceId:Id, title:nonEmpty.max(200), markdown:z.string().max(500*1024).optional() }, ({spaceId,title,markdown}) => run('POST','/spaces/'+spaceId+'/proposals',{kind:'create',title,body:markdown??'',visibility:'inherit',grants:[]}));
+    register('propose_document_create', '在启用复核的知识库提交新文档提案；不会直接创建正式文档。', { spaceId:Id, parentId:Id.optional(), title:nonEmpty.max(200), markdown:z.string().max(500*1024).optional() }, ({spaceId,parentId,title,markdown}) => run('POST','/spaces/'+spaceId+'/proposals',{kind:'create',title,body:markdown??'',parentId,visibility:'inherit',grants:[]}));
     register('propose_document_update', '提交文档标题和正文修改供负责人复核，不直接修改正式内容。', {documentId:Id,version:z.number().int().positive(),title:nonEmpty.max(200),markdown:z.string().max(500*1024)}, ({documentId,version,title,markdown}) => run('POST','/documents/'+documentId+'/proposals',{kind:'update',baseVersion:version,title,body:markdown}));
     register('withdraw_my_proposal', '撤回自己尚待处理的提案。', {proposalId:Id}, ({proposalId}) => run('POST','/proposals/'+proposalId+'/withdraw',{}));
     register('add_document_comment', '在可编辑文档的指定版本、草稿或本人提案上添加讨论。', {documentId:Id,source:commentSource,quote:z.string().max(1000),anchor:z.object({paragraphIndex:z.number().int().nonnegative(),startOffset:z.number().int().nonnegative(),endOffset:z.number().int().nonnegative()}).strict(),body:nonEmpty.max(2000),mentionUserIds:z.array(Id).max(50).optional()}, ({documentId,source,quote,anchor,body,mentionUserIds}) => run('POST','/documents/'+documentId+'/comments',{source,quote,anchor,body,mentionUserIds:mentionUserIds??[]}));

@@ -124,6 +124,61 @@ function docAccess(userId: string, documentId: string, role: string) {
 }
 
 describe('content and ACL API', () => {
+  it('creates same-space children, requires parent edit access, inherits every ancestor ACL and prevents deleting parents', async () => {
+    const parent = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, {
+      title: 'Restricted parent', body: 'ancestor secret', visibility: 'restricted', grants: [{ userId: f.editor, role: 'editor' }],
+    });
+    expect(parent.statusCode).toBe(201);
+    const parentId = parent.json().document.id as string;
+    expect(parent.json().document.parentId).toBeNull();
+    const child = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, {
+      title: 'Child secret', body: 'child text must remain hidden', parentId, visibility: 'restricted', grants: [{ userId: f.viewer, role: 'editor' }],
+    });
+    expect(child.statusCode).toBe(201);
+    const childId = child.json().document.id as string;
+    expect(child.json().document.parentId).toBe(parentId);
+
+    expect((await request('viewer', 'GET', `/api/documents/${childId}`)).statusCode).toBe(404);
+    expect((await request('viewer', 'GET', `/api/documents/${childId}/export`)).statusCode).toBe(404);
+    const listed = await request('viewer', 'GET', `/api/spaces/${f.teamSpace}/documents`);
+    expect(listed.json().documents.map((document: { id: string }) => document.id)).not.toContain(childId);
+    const search = await request('viewer', 'GET', `/api/teams/${f.team}/search?q=child%20text`);
+    expect(search.json().documents.map((document: { id: string }) => document.id)).not.toContain(childId);
+
+    const editorDeniedParent = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, {
+      title: 'Viewer-only parent', visibility: 'restricted', grants: [{ userId: f.viewer, role: 'editor' }],
+    });
+    const noParentEdit = await request('editor', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Must not attach', parentId: editorDeniedParent.json().document.id });
+    expect(noParentEdit.statusCode).toBe(403);
+    const crossSpaceParent = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Wrong space', parentId: f.otherDoc });
+    expect(crossSpaceParent.statusCode).toBe(404);
+    expect((await request('owner', 'DELETE', `/api/documents/${parentId}`)).statusCode).toBe(409);
+
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team, f.spaceViewer);
+    const deleteProposal = await request('owner', 'POST', `/api/documents/${parentId}/proposals`, { kind: 'delete', baseVersion: 1 });
+    expect(deleteProposal.statusCode).toBe(201);
+    const reviewedDelete = await request('spaceViewer', 'POST', `/api/proposals/${deleteProposal.json().proposal.id}/decision`, { decision: 'approve' });
+    expect(reviewedDelete.statusCode).toBe(409);
+    expect((await request('owner', 'GET', `/api/documents/${parentId}`)).statusCode).toBe(200);
+  });
+
+  it('rechecks the proposed child parent permission when an approval is decided', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    const proposal = await request('editor', 'POST', `/api/spaces/${f.teamSpace}/proposals`, {
+      kind: 'create', title: 'Pending child', body: 'pending content', parentId: f.inherited,
+    });
+    expect(proposal.statusCode).toBe(201);
+    const proposalId = proposal.json().proposal.id as string;
+    expect(proposal.json().proposal.parentId).toBe(f.inherited);
+    db.prepare("UPDATE documents SET visibility='restricted' WHERE id=?").run(f.inherited);
+
+    const decision = await request('owner', 'POST', `/api/proposals/${proposalId}/decision`, { decision: 'approve' });
+    expect(decision.statusCode).toBe(409);
+    expect((await request('owner', 'GET', `/api/proposals/${proposalId}`)).json().proposal).toMatchObject({ status: 'conflicted', parentId: f.inherited });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM documents WHERE title=?').get('Pending child')).toEqual({ count: 0 });
+  });
+
   it('filters spaces and documents by the shared layered ACL, including cross-team isolation', async () => {
     const ownerSpaces = await request('owner', 'GET', `/api/teams/${f.team}/spaces`);
     expect(ownerSpaces.statusCode).toBe(200);
