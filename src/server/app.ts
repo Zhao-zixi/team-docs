@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
+import websocket from '@fastify/websocket';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
@@ -17,6 +18,12 @@ import { authenticateAgentToken, authorizeAgentRoute } from './agentAuth.js';
 import { registerAgentCredentialRoutes } from './agentTokens.js';
 import { createTeamShelfMcpHandler } from './mcp.js';
 import { registerMailRoutes } from './mail.js';
+import { registerAccessExplainRoutes } from './accessExplain.js';
+import { registerProposalRoutes } from './proposals.js';
+import { registerCollaborationRoutes } from './collaboration.js';
+import { registerCommentRoutes } from './comments.js';
+import { registerWorkflowRoutes } from './workflow.js';
+import { registerExternalRoomRoutes } from './rooms.js';
 import type { MailSender } from './mailer.js';
 
 export interface CreateAppOptions {
@@ -36,8 +43,9 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     trustProxy: false,
   });
 
+  app.register(websocket, { options: { maxPayload: 128 * 1024 } });
   app.register(cookie);
-  app.register(rateLimit, { global: true, max: 120, timeWindow: 60_000 });
+  app.register(rateLimit, { global: true, max: 600, timeWindow: 60_000 });
   app.register(helmet, {
     frameguard: { action: 'deny' },
     hsts: config.appOrigin.startsWith('https://') ? { maxAge: 31_536_000 } : false,
@@ -48,7 +56,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", 'data:', 'blob:'],
         fontSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'"],
+        connectSrc: ["'self'", new URL(config.appOrigin).protocol === 'https:' ? `wss://${new URL(config.appOrigin).host}` : `ws://${new URL(config.appOrigin).host}`],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
@@ -105,6 +113,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     } catch { /* Keep audit failures from changing an already-produced response. */ }
   });  app.addHook('onSend', async (request, reply, payload) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/mcp')) reply.header('cache-control', 'no-store');
+    if (request.url.startsWith('/share/') || request.url.startsWith('/api/share/')) reply.header('referrer-policy', 'no-referrer');
     return payload;
   });
 
@@ -134,6 +143,12 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     registerContentRoutes(api, context);
     registerAgentCredentialRoutes(api, context);
     registerMailRoutes(api, context);
+    registerAccessExplainRoutes(api, context);
+    registerProposalRoutes(api, context);
+    registerCollaborationRoutes(api, context);
+    registerCommentRoutes(api, context);
+    registerWorkflowRoutes(api, context);
+    registerExternalRoomRoutes(api, context);
   }, { prefix: '/api' });
   app.route({ method: ['GET', 'POST', 'DELETE'], url: '/mcp', handler: async (request, reply) => {
     const host = request.headers.host;

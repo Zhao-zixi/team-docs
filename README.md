@@ -73,6 +73,24 @@ SQLite 数据默认位于本机 `DATA_DIR` 或 Docker 持久命名卷。不要�
 
 团队管理员可在“邮箱与邀请”中配置自己的 SMTP 发信邮箱，测试邮件只会发送到自己的登录邮箱。成员邀请默认通过邮件发送；也可单独生成手动链接，该操作不会发送邮件或验证邮箱。配置与故障处理见[邮箱与邀请指南](docs/EMAIL.md)。新账号和修改密码要求密码至少 15 个 Unicode 字符。
 
+## 协作、审阅与资料室
+
+![多人协作草稿与文档审阅界面](docs/images/teamshelf-collaboration-demo.png)
+
+*演示使用隔离数据库和虚构团队数据。协作草稿与正式文档分开；正式正文只在发布或提案获批后更新。*
+
+多人可在 Markdown 或富文本协作草稿中同步编辑，并使用段落评论、回复和 @ 提醒讨论。启用知识库审阅后，新建、修改、恢复和删除会先成为提案；作者可以查看或撤回自己的提案，另一位管理员核对前后差异后批准或驳回。版本冲突时，草稿保留，作者先查看正式版与草稿差异，再明确确认新基线。
+
+文档还可设置负责人、复核和到期时间；管理员能查看服务端计算的权限解释、变更影响预览与团队权限体检。外部资料室只展示管理员选定的正式版本快照，可设口令和有效期，并可撤销及查看访问记录。
+
+![提案差异审阅示例](docs/images/teamshelf-review-demo.png)
+
+![权限变更影响预览示例](docs/images/teamshelf-permissions-demo.png)
+
+![知屿 TeamShelf 协作、审阅与资料室数据流](docs/images/teamshelf-collaboration-architecture.svg)
+
+完整功能边界、部署 WebSocket 反向代理和提醒说明见[协作与审阅指南](docs/COLLABORATION.md)。
+
 ## 开发者进阶
 
 Windows 开发环境需要 [PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.6)、[Node.js 24 LTS](https://nodejs.org/en/download) 和 npm。在项目根目录运行：
@@ -82,5 +100,3 @@ pwsh -NoProfile -File .\scripts\start-dev.ps1
 ```
 
 网页默认地址为 `http://localhost:5173`。开发服务与生产服务不要同时使用同一数据目录。接口、测试、固定 digest 部署和 GitHub 自动更新细节分别见[API 契约](docs/API.md)、[测试说明](docs/TESTING.md)、[部署指南](docs/DEPLOYMENT.md)和[CI/CD 指南](docs/CICD.md)。
-
-TeamShelf 支持团队共享文档，但当前不提供多人实时协同编辑。

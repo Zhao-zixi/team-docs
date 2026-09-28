@@ -111,6 +111,14 @@ function request(user: keyof Fixture['tokens'], method: 'GET' | 'POST' | 'PATCH'
   return app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
 }
 
+function bearerOwner() {
+  const token = `ts_agent_${randomUUID().replaceAll('-', '')}`;
+  const now = isoNow();
+  db.prepare(`INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at)
+    VALUES(?,?,?,NULL,'review test','manage',?, 'test…token',?,?)`)
+    .run(randomUUID(), f.owner, f.team, hashToken(token), now, new Date(Date.now() + 86_400_000).toISOString());
+  return token;
+}
 function docAccess(userId: string, documentId: string, role: string) {
   addGrant('document_grants', 'document_id', documentId, userId, role);
 }
@@ -251,5 +259,153 @@ describe('content and ACL API', () => {
     expect(extra.statusCode).toBe(400);
     const badTitle = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: '   ', body: '' });
     expect(badTitle.statusCode).toBe(400);
+  });
+  it('explains effective access and previews space/document ACL changes without side effects', async () => {
+    const explanation = await request('owner', 'GET', `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`);
+    expect(explanation.statusCode).toBe(200);
+    expect(explanation.json().effective).toEqual({ canRead: true, canEdit: false, canManage: false });
+    expect(explanation.json().reasons.some((reason: { layer: string; code: string }) => reason.layer === 'space' && reason.code === 'space_grant')).toBe(true);
+    expect((await request('spaceViewer', 'GET', `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`)).statusCode).toBe(403);
+    expect((await request('owner', 'GET', `/api/spaces/${f.otherSpace}/access/explain?userId=${f.otherOwner}`)).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`, headers: { authorization: `Bearer ${bearerOwner()}`, origin: 'http://localhost:5173' } })).statusCode).toBe(403);
+
+    const spaceBefore = db.prepare('SELECT visibility FROM spaces WHERE id=?').get(f.teamSpace) as { visibility: string };
+    const spacePreview = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/access/preview`, {
+      visibility: 'restricted', grants: [{ userId: f.viewer, role: 'viewer' }], offset: 0, limit: 1,
+    });
+    expect(spacePreview.statusCode).toBe(200);
+    expect(spacePreview.json().totals.membersChanged).toBeGreaterThan(0);
+    expect(spacePreview.json().totals.documentsReadLost).toBeGreaterThan(0);
+    expect(spacePreview.json().hasMore).toBe(true);
+    expect((db.prepare('SELECT visibility FROM spaces WHERE id=?').get(f.teamSpace) as { visibility: string }).visibility).toBe(spaceBefore.visibility);
+    expect(db.prepare('SELECT 1 FROM space_grants WHERE space_id=?').get(f.teamSpace)).toBeUndefined();
+
+    const docPreview = await request('owner', 'POST', `/api/documents/${f.docRestricted}/access/preview`, {
+      visibility: 'restricted', grants: [],
+    });
+    expect(docPreview.statusCode).toBe(200);
+    expect(docPreview.json().totals.readLost).toBeGreaterThan(0);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM document_grants WHERE document_id=?').get(f.docRestricted)).toEqual({ count: 2 });
+    expect((await request('editor', 'POST', `/api/documents/${f.docRestricted}/access/preview`, { visibility: 'inherit', grants: [] })).statusCode).toBe(403);
+    expect((await request('owner', 'POST', `/api/documents/${f.otherDoc}/access/preview`, { visibility: 'inherit', grants: [] })).statusCode).toBe(404);
+  });
+
+  it('submits immutable proposals and approves create/update/delete only by a different current manager', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    const create = await request('editor','POST',`/api/spaces/${f.teamSpace}/proposals`,{kind:'create',title:'Proposed note',body:'snapshot body',visibility:'inherit',grants:[]});
+    expect(create.statusCode).toBe(201);
+    const createId=create.json().proposal.id;
+    expect((await request('editor','POST',`/api/proposals/${createId}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    const approvedCreate=await request('owner','POST',`/api/proposals/${createId}/decision`,{decision:'approve'});
+    expect(approvedCreate.statusCode).toBe(200);
+    const createdDoc=db.prepare("SELECT id,title,body,version FROM documents WHERE space_id=? AND title='Proposed note'").get(f.teamSpace) as {id:string;title:string;body:string;version:number};
+    expect(createdDoc).toMatchObject({title:'Proposed note',body:'snapshot body',version:1});
+    expect(db.prepare('SELECT COUNT(*) AS n FROM revisions WHERE document_id=?').get(createdDoc.id)).toEqual({n:1});
+
+    const update=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:1,title:'Proposed title',body:'proposed body'});
+    expect(update.statusCode).toBe(201);
+    expect(update.json().proposal.body).toBe('proposed body');
+    expect((await request('owner','POST',`/api/proposals/${update.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect((await request('viewer','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({title:'Proposed title',body:'proposed body',version:2});
+
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    const deleteProposal=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'delete',baseVersion:2});
+    expect(deleteProposal.statusCode).toBe(201);
+    expect((await request('editor','POST',`/api/proposals/${deleteProposal.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect(db.prepare('SELECT 1 FROM documents WHERE id=?').get(f.inherited)).toBeUndefined();
+    const retained=db.prepare('SELECT status,target_document_id,body FROM proposals WHERE id=?').get(deleteProposal.json().proposal.id) as {status:string;target_document_id:string;body:string};
+    expect(retained).toMatchObject({status:'approved',target_document_id:f.inherited,body:'proposed body'});
+    const teamQueue=await request('editor','GET',`/api/teams/${f.team}/proposals?status=approved&limit=10`);
+    expect(teamQueue.statusCode).toBe(200);
+    expect(teamQueue.json().proposals.length).toBeGreaterThanOrEqual(3);
+    expect(teamQueue.json().proposals[0]).not.toHaveProperty('body');
+    const editorMine=await request('editor','GET',`/api/teams/${f.team}/proposals?mine=true&status=approved`);
+    expect(editorMine.statusCode).toBe(200);
+    expect(editorMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.editor)).toBe(true);
+    expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
+    const ownerToken=bearerOwner();
+    const agentMine=await app.inject({method:'GET',url:`/api/teams/${f.team}/proposals`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}});
+    expect(agentMine.statusCode).toBe(200);
+    expect(agentMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.owner)).toBe(true);
+    expect((await app.inject({method:'GET',url:`/api/proposals/${createId}`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}})).statusCode).toBe(404);
+    expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
+  });
+  it('rechecks review policy, author permissions and CAS during decision; supports restore and withdraw', async () => {
+    const enabled=await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:true});
+    expect(enabled.statusCode).toBe(200);
+    expect((await request('editor','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:false})).statusCode).toBe(403);
+    const revision=db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(f.inherited) as {id:string};
+    const restore=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'restore',baseVersion:1,revisionId:revision.id});
+    expect(restore.statusCode).toBe(201);
+    const token=bearerOwner();
+    const agentDecision=await app.inject({method:'POST',url:`/api/proposals/${restore.json().proposal.id}/decision`,headers:{authorization:`Bearer ${token}`,origin:'http://localhost:5173','content-type':'application/json'},payload:JSON.stringify({decision:'approve'})});
+    expect(agentDecision.statusCode).toBe(403);
+    expect((await request('editor','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    expect((await request('owner','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    expect((await request('editor','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect((await request('owner','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({version:2,title:'Open notes'});
+
+    const stale=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:2,title:'Stale proposal',body:'must not publish'});
+    expect(stale.statusCode).toBe(201);
+    expect((await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:false})).statusCode).toBe(200);
+    expect((await request('editor','PATCH',`/api/documents/${f.inherited}`,{title:'Direct v3',body:'direct v3',version:2})).statusCode).toBe(200);
+    expect((await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:true})).statusCode).toBe(200);
+    const staleDecision=await request('owner','POST',`/api/proposals/${stale.json().proposal.id}/decision`,{decision:'approve'});
+    expect(staleDecision.statusCode).toBe(409);
+    expect((db.prepare('SELECT status FROM proposals WHERE id=?').get(stale.json().proposal.id) as {status:string}).status).toBe('conflicted');
+    expect((await request('owner','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({version:3,title:'Direct v3',body:'direct v3'});
+
+    const authorLoss=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:3,title:'Lost author',body:'blocked'});
+    expect(authorLoss.statusCode).toBe(201);
+    db.prepare("UPDATE members SET role='viewer' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    const lostDecision=await request('owner','POST',`/api/proposals/${authorLoss.json().proposal.id}/decision`,{decision:'approve'});
+    expect(lostDecision.statusCode).toBe(409);
+    expect((db.prepare('SELECT status FROM proposals WHERE id=?').get(authorLoss.json().proposal.id) as {status:string}).status).toBe('conflicted');
+
+    const withdraw=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'delete',baseVersion:3});
+    expect(withdraw.statusCode).toBe(201);
+    expect((await request('owner','POST',`/api/proposals/${withdraw.json().proposal.id}/withdraw`,{})).statusCode).toBe(200);
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    expect((await request('editor','POST',`/api/proposals/${withdraw.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(409);
+  });
+
+  it('reports team access health with ACL-derived counts, pagination and manager-only access', async () => {
+    const response = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=0&limit=1`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().totals).toMatchObject({ members: 5, spaces: 2, documents: 4 });
+    expect(response.json().members).toHaveLength(1);
+    expect(response.json().hasMore).toBe(true);
+    expect(response.json().nextOffset).toBe(1);
+    const viewerHealth = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=1&limit=10`);
+    const viewerRow = viewerHealth.json().members.find((member: {userId:string}) => member.userId === f.viewer);
+    expect(viewerRow).toMatchObject({spacesReadable:1,spacesEditable:0,documentsReadable:2,documentsEditable:0});
+    expect((await request('editor', 'GET', `/api/teams/${f.team}/access/health`)).statusCode).toBe(403);
+    const bearer = await app.inject({method:'GET',url:`/api/teams/${f.team}/access/health`,headers:{authorization:`Bearer ${bearerOwner()}`,origin:'http://localhost:5173'}});
+    expect(bearer.statusCode).toBe(403);
+    expect((await request('owner', 'GET', `/api/teams/${f.otherTeam}/access/health`)).statusCode).toBe(404);
+  });
+  it('blocks all direct document mutations in review-required spaces without altering published state', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    const policy = await request('owner', 'GET', `/api/spaces/${f.teamSpace}/review-policy`);
+    expect(policy.statusCode).toBe(200);
+    expect(policy.json()).toEqual({ requireReview: true });
+    expect((await request('editor', 'GET', `/api/spaces/${f.teamSpace}/review-policy`)).statusCode).toBe(403);
+
+    const created = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Blocked', body: 'draft' });
+    const patched = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Blocked', body: 'new body', version: 1 });
+    const restored = await request('owner', 'POST', `/api/documents/${f.inherited}/revisions/${db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(f.inherited)?.id}/restore`, { version: 1 });
+    const deleted = await request('owner', 'DELETE', `/api/documents/${f.inherited}`);
+    for (const response of [created, patched, restored, deleted]) {
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('REVIEW_REQUIRED');
+    }
+    expect((await request('owner', 'GET', `/api/documents/${f.inherited}`)).json().document).toMatchObject({ version: 1, body: '# Visible needle\n**Markdown** stays intact.' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(f.teamSpace)).toEqual({ count: 2 });
+
+    const token = bearerOwner();
+    const mcpRest = await app.inject({ method: 'PATCH', url: `/api/documents/${f.inherited}`, headers: { authorization: `Bearer ${token}`, origin: 'http://localhost:5173', 'content-type': 'application/json' }, payload: JSON.stringify({ title: 'Agent blocked', body: 'blocked', version: 1 }) });
+    expect(mcpRest.statusCode).toBe(409);
+    expect(mcpRest.json().error.code).toBe('REVIEW_REQUIRED');
   });
 });

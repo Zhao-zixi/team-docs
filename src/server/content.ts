@@ -6,7 +6,7 @@ import { requireUserId } from './auth.js';
 import { getDocumentAccess, getSpaceAccess, listVisibleDocumentIds } from './acl.js';
 import type { AppContext } from './context.js';
 import { transaction } from './db.js';
-import { badRequest, conflict, forbidden, notFound } from './errors.js';
+import { badRequest, conflict, forbidden, notFound, reviewRequired } from './errors.js';
 import { isoNow } from './security.js';
 import { hasExplicitPage, paginate, parsePage } from './pagination.js';
 import { validateBody } from './validation.js';
@@ -154,6 +154,11 @@ function requireManager(canManage: boolean): void {
   if (!canManage) throw forbidden();
 }
 
+function ensureDirectChangesAllowed(db: AppContext['db'], spaceId: string): void {
+  const row = db.prepare('SELECT require_review FROM spaces WHERE id=?').get(spaceId) as { require_review: number } | undefined;
+  if (row?.require_review === 1) throw reviewRequired();
+}
+
 function requireBodyBytes(body: string): void {
   if (Buffer.byteLength(body, 'utf8') > 500 * 1024) throw badRequest('文档正文不能超过 500 KB。');
 }
@@ -272,6 +277,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const input = request.body as z.infer<typeof CreateDocumentSchema>;
     const user = actor(db, request);
     const { access } = visibleSpace(db, user.id, spaceId!);
+    ensureDirectChangesAllowed(db, spaceId!);
     if (!access.canEdit) throw forbidden();
     if (request.agentPrincipal && (input.visibility === 'restricted' || input.grants.length > 0) && (request.agentPrincipal.scope !== 'manage' || !access.canManage)) throw forbidden('Agent 凭据需要当前 manage 权限才能设置文档访问权限。');
     requireBodyBytes(input.body);
@@ -305,6 +311,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const input = request.body as z.infer<typeof UpdateDocumentSchema>;
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
+    ensureDirectChangesAllowed(db, access.spaceId);
     if (!access.canEdit) throw forbidden();
     requireBodyBytes(input.body);
     const title = input.title.trim();
@@ -330,6 +337,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
     requireManager(access.canManage);
+    ensureDirectChangesAllowed(db, access.spaceId);
     transaction(db, () => {
       audit(db, access.teamId, user.id, 'document.delete', 'document', id!, { title: row.title });
       db.prepare('DELETE FROM documents WHERE id=?').run(id);
@@ -393,6 +401,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     const user = actor(db, request);
     const { row, access } = visibleDocument(db, user.id, id!);
     requireManager(access.canManage);
+    ensureDirectChangesAllowed(db, access.spaceId);
     const revision = db.prepare(`SELECT title,body FROM revisions WHERE id=? AND document_id=?`)
       .get(revisionId, id) as { title: string; body: string } | undefined;
     if (!revision) throw notFound();

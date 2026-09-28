@@ -6,6 +6,6 @@ export default defineConfig({
   build: { outDir: 'dist/client', emptyOutDir: true },
   server: {
     port: 5173,
-    proxy: { '/api': { target: 'http://127.0.0.1:3000', changeOrigin: false } },
+    proxy: { '/api': { target: 'http://127.0.0.1:3000', changeOrigin: false, ws: true } },
   },
 });

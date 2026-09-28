@@ -15,8 +15,8 @@ export interface AgentPrincipal {
 
 export type AgentOperation =
   | 'identity' | 'team.read' | 'team.manage' | 'member.read' | 'member.manage'
-  | 'invite.read' | 'invite.manage' | 'space.read' | 'space.manage'
-  | 'document.read' | 'document.write' | 'document.manage' | 'audit.read';
+  | 'invite.read' | 'invite.manage' | 'space.read' | 'space.manage' | 'proposal.read' | 'proposal.write'
+  | 'document.read' | 'document.write' | 'document.manage' | 'comment.read' | 'comment.write' | 'audit.read';
 
 export interface AgentRoutePolicy {
   scope: AgentScope;
@@ -24,6 +24,8 @@ export interface AgentRoutePolicy {
   teamParam?: 'teamId';
   spaceParam?: 'spaceId';
   documentParam?: 'id';
+  proposalParam?: 'id';
+  commentParam?: 'threadId';
   allowSpaceBound?: boolean;
 }
 
@@ -86,7 +88,19 @@ export function authorizeAgentRoute(
     if (!space || space.team_id !== principal.teamId) throw notFound();
     if (principal.spaceId && principal.spaceId !== spaceId) throw notFound();
   }
-  if (policy.documentParam) {
+  if (policy.proposalParam) {
+    const proposalId = routeParams[policy.proposalParam];
+    if (typeof proposalId !== 'string') throw notFound();
+    const proposal = db.prepare('SELECT team_id,space_id,author_id FROM proposals WHERE id=?').get(proposalId) as {team_id:string;space_id:string;author_id:string}|undefined;
+    if (!proposal || proposal.team_id !== principal.teamId || proposal.author_id !== principal.userId) throw notFound();
+    if (principal.spaceId && principal.spaceId !== proposal.space_id) throw notFound();
+  }  if (policy.commentParam) {
+    const commentId = routeParams[policy.commentParam];
+    if (typeof commentId !== 'string') throw notFound();
+    const comment = db.prepare(`SELECT d.id AS document_id,d.space_id,s.team_id FROM document_comments c JOIN documents d ON d.id=c.document_id JOIN spaces s ON s.id=d.space_id WHERE c.id=?`).get(commentId) as {document_id:string;space_id:string;team_id:string}|undefined;
+    if (!comment || comment.team_id !== principal.teamId) throw notFound();
+    if (principal.spaceId && comment.space_id !== principal.spaceId) throw notFound();
+  }  if (policy.documentParam) {
     const documentId = routeParams[policy.documentParam];
     if (typeof documentId !== 'string') throw notFound();
     const document = db.prepare(`SELECT s.team_id,d.space_id FROM documents d

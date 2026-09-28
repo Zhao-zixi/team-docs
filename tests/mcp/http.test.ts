@@ -87,6 +87,63 @@ describe('TeamShelf HTTP MCP tools', () => {
     expect(updated.isError).not.toBe(true);
   });
 
+  it('exposes author-scoped proposal tools and scoped workflow operations without approval or sharing tools', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(spaceId);
+    const writeNames=(await writeClient.listTools()).tools.map(tool=>tool.name);
+    expect(writeNames).toContain('propose_document_create');expect(writeNames).toContain('propose_document_update');expect(writeNames).toContain('withdraw_my_proposal');expect(writeNames).not.toContain('propose_document_delete');expect(writeNames).not.toContain('decide_proposal');expect(writeNames).not.toContain('create_external_room');expect(writeNames).not.toContain('set_mail_settings');
+
+    const createResult=await writeClient.callTool({name:'propose_document_create',arguments:{spaceId,title:'MCP proposed page',markdown:'proposal body'}});
+    expect(createResult.isError).not.toBe(true);
+    const created=JSON.parse((createResult.content[0] as {text:string}).text) as {proposal:{id:string;status:string;kind:string}};
+    expect(created.proposal).toMatchObject({status:'pending',kind:'create'});
+    expect(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE title='MCP proposed page'").get()).toEqual({count:0});
+
+    const own=await ownerClient.callTool({name:'list_my_proposals',arguments:{status:'pending'}});
+    expect(JSON.stringify(own)).toContain(created.proposal.id);
+    expect((await ownerClient.callTool({name:'get_my_proposal',arguments:{proposalId:created.proposal.id}})).isError).not.toBe(true);
+    const withdrawn=await writeClient.callTool({name:'withdraw_my_proposal',arguments:{proposalId:created.proposal.id}});
+    expect(withdrawn.isError).not.toBe(true);
+    expect((db.prepare('SELECT status FROM proposals WHERE id=?').get(created.proposal.id) as {status:string}).status).toBe('withdrawn');
+
+    const updated=await writeClient.callTool({name:'propose_document_update',arguments:{documentId,version:1,title:'Proposed update',markdown:'proposed body'}});
+    const updateProposalId=(JSON.parse((updated.content[0] as {text:string}).text) as {proposal:{id:string}}).proposal.id;
+    expect(updated.isError).not.toBe(true);
+    expect(db.prepare('SELECT title,body,version FROM documents WHERE id=?').get(documentId)).toEqual({title:'Seed document',body:'# Seed body',version:1});
+    const added=await writeClient.callTool({name:'add_document_comment',arguments:{documentId,source:{kind:'published',version:1},quote:'Seed body',anchor:{paragraphIndex:0,startOffset:0,endOffset:10},body:'Review this paragraph',mentionUserIds:[]}});
+    expect(added.isError).not.toBe(true);const thread=JSON.parse((added.content[0] as {text:string}).text) as {comment:{id:string}};
+    const listedComments=await ownerClient.callTool({name:'list_document_comments',arguments:{documentId}});
+    expect(JSON.stringify(listedComments)).toContain('Review this paragraph');
+    const reply=await writeClient.callTool({name:'reply_to_comment',arguments:{threadId:thread.comment.id,body:'I will revise it.',mentionUserIds:[]}});
+    expect(reply.isError).not.toBe(true);
+    const resolved=await writeClient.callTool({name:'resolve_comment',arguments:{threadId:thread.comment.id,resolved:true}});
+    expect(resolved.isError).not.toBe(true);
+
+    const manageSecret='ts_agent_'+'m'.repeat(40);
+    db.prepare('INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(randomUUID(),userId,teamId,null,'manage test','manage',hashToken(manageSecret),'hint',isoNow(),new Date(Date.now()+86400000).toISOString());
+    const manager=await connect(manageSecret);
+    try {
+      const bearerHeaders={authorization:`Bearer ${manageSecret}`,'x-requested-with':'TeamShelf','content-type':'application/json'};
+      expect((await app.inject({method:'POST',url:`/api/proposals/${updateProposalId}/decision`,headers:bearerHeaders,payload:{decision:'approve'}})).statusCode).toBe(403);
+      expect((await app.inject({method:'PUT',url:'/api/mail/settings',headers:bearerHeaders,payload:{host:'localhost',port:465,security:'tls',username:'x',fromEmail:'x@example.test',fromName:'x',password:'x'}})).statusCode).toBe(403);
+      expect((await app.inject({method:'POST',url:`/api/teams/${teamId}/rooms`,headers:bearerHeaders,payload:{name:'must not create',expiresAt:new Date(Date.now()+3600000).toISOString(),password:'room secret',items:[{documentId,publishedVersion:1}]}})).statusCode).toBe(403);
+      expect((await app.inject({method:'PUT',url:`/api/teams/${teamId}/reminders`,headers:bearerHeaders,payload:{enabled:true,senderUserId:userId}})).statusCode).toBe(403);
+      const names=(await manager.listTools()).tools.map(tool=>tool.name);
+      expect(names).toContain('propose_document_restore');expect(names).toContain('propose_document_delete');expect(names).toContain('set_document_workflow');expect(names).toContain('mark_document_reviewed');
+      expect(names).not.toContain('decide_proposal');expect(names).not.toContain('create_external_room');expect(names).not.toContain('set_mail_settings');
+      const revisionId=(db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(documentId) as {id:string}).id;
+      const restore=await manager.callTool({name:'propose_document_restore',arguments:{documentId,version:1,revisionId}});
+      expect(restore.isError).not.toBe(true);
+      const removal=await manager.callTool({name:'propose_document_delete',arguments:{documentId,version:1}});
+      expect(removal.isError).not.toBe(true);
+      const workflow=await manager.callTool({name:'set_document_workflow',arguments:{documentId,responsibleUserId:userId,reviewAt:null,dueAt:null,metadataVersion:0}});
+      expect(workflow.isError).not.toBe(true);
+      const viewed=await writeClient.callTool({name:'get_document_workflow',arguments:{documentId}});
+      expect(JSON.stringify(viewed)).toContain(userId);
+      const reviewed=await writeClient.callTool({name:'mark_document_reviewed',arguments:{documentId,metadataVersion:1}});
+      expect(reviewed.isError).not.toBe(true);
+    } finally { await manager.close(); }
+  });
   it('finds a specific older revision across the REST pagination boundary', async () => {
     const insert = db.prepare('INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name) VALUES(?,?,?,?,?,?,?,?)');
     for (let version = 2; version <= 110; version++) insert.run(randomUUID(), documentId, version, `Version ${version}`, `body-${version}`, isoNow(), userId, 'Owner');
