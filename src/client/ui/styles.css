@@ -24,3 +24,34 @@
 @media (max-width: 600px) { .collab-rebase { padding: 0.75rem; } .collab-rebase .review-diff { grid-template-columns: minmax(0,1fr); } .collab-rebase .secondary-button { width: 100%; white-space: normal; } }
 
 .workflow-page{padding-top:0;padding-bottom:32px}@media(max-width:600px){.workflow-dates{grid-template-columns:minmax(0,1fr)}}
+
+/* Independent desktop navigation rails; mobile keeps the team drawer and swaps the document list/content. */
+.panel-collapse-toggle{flex:none}.sidebar-collapse-toggle{margin-left:auto}
+.team-sidebar-collapsed .sidebar{width:58px;flex:0 0 58px;align-items:center;padding:18px 8px 14px}
+.team-sidebar-collapsed .brand-row{width:100%;padding:1px 0 16px;flex-direction:column;align-items:center;gap:8px}
+.team-sidebar-collapsed .brand-text,.team-sidebar-collapsed .sidebar-content{display:none}
+.team-sidebar-collapsed .sidebar-collapse-toggle{display:grid;margin:0}
+.document-nav-collapsed .doc-nav{width:58px;flex:0 0 58px;align-items:center}
+.document-nav-collapsed .doc-nav-content{display:none}
+.doc-nav-restore{display:none}
+.document-nav-collapsed .doc-nav-restore{display:inline-grid;margin:20px 0}
+.document-nav-collapsed .doc-nav-desktop-toggle{display:none}
+.mobile-doc-list-toggle{display:none}
+@media(max-width:760px){
+  .sidebar-collapse-toggle,.doc-nav-desktop-toggle,.doc-nav-restore{display:none!important}
+  .team-sidebar-collapsed .sidebar{width:min(286px,84vw);flex:0 0 min(286px,84vw);align-items:stretch;padding:24px 15px 14px}
+  .team-sidebar-collapsed .brand-row{width:auto;padding:1px 8px 28px;flex-direction:row;align-items:center;gap:10px}
+  .team-sidebar-collapsed .brand-text,.team-sidebar-collapsed .sidebar-content{display:flex}
+  .team-sidebar-collapsed .brand-text{flex-direction:column}
+  .workspace{position:relative;overflow:hidden}
+  .doc-nav{position:absolute;inset:0;width:100%;flex:1;z-index:1}
+  .content-panel{display:none;position:absolute;inset:0;width:100%;z-index:2}
+  .app-shell.mobile-document-content .doc-nav{display:none}
+  .app-shell.mobile-document-content .content-panel{display:block}
+  .document-nav-collapsed .doc-nav{width:100%;flex:1}
+  .document-nav-collapsed .doc-nav-content{display:flex}
+  .mobile-doc-list-toggle{display:grid;flex:none}
+  .topbar{gap:7px}
+  .topbar-left{gap:4px}
+  .search-wrap{width:min(32vw,130px)}
+}
