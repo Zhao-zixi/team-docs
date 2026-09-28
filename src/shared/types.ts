@@ -121,7 +121,7 @@ export interface ProposalSummary {
   authorId: string; authorName: string; baseVersion: number | null; title: string; status: ProposalStatus;
   reviewerId: string | null; decisionNote: string | null; createdAt: string; decidedAt: string | null;
 }
-export interface Proposal extends ProposalSummary { body: string; sourceDraftId: string | null }
+export interface Proposal extends ProposalSummary { body: string; sourceDraftId: string | null; visibility?: DocumentVisibility; grants?: Grant[]; revisionId?: string | null }
 
 export type CommentSource =
   | { kind: 'published'; version: number }

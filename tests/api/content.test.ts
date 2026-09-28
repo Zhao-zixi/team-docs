@@ -290,6 +290,86 @@ describe('content and ACL API', () => {
     expect((await request('owner', 'POST', `/api/documents/${f.otherDoc}/access/preview`, { visibility: 'inherit', grants: [] })).statusCode).toBe(404);
   });
 
+  it('submits immutable proposals and approves create/update/delete only by a different current manager', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    const create = await request('editor','POST',`/api/spaces/${f.teamSpace}/proposals`,{kind:'create',title:'Proposed note',body:'snapshot body',visibility:'inherit',grants:[]});
+    expect(create.statusCode).toBe(201);
+    const createId=create.json().proposal.id;
+    expect((await request('editor','POST',`/api/proposals/${createId}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    const approvedCreate=await request('owner','POST',`/api/proposals/${createId}/decision`,{decision:'approve'});
+    expect(approvedCreate.statusCode).toBe(200);
+    const createdDoc=db.prepare("SELECT id,title,body,version FROM documents WHERE space_id=? AND title='Proposed note'").get(f.teamSpace) as {id:string;title:string;body:string;version:number};
+    expect(createdDoc).toMatchObject({title:'Proposed note',body:'snapshot body',version:1});
+    expect(db.prepare('SELECT COUNT(*) AS n FROM revisions WHERE document_id=?').get(createdDoc.id)).toEqual({n:1});
+
+    const update=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:1,title:'Proposed title',body:'proposed body'});
+    expect(update.statusCode).toBe(201);
+    expect(update.json().proposal.body).toBe('proposed body');
+    expect((await request('owner','POST',`/api/proposals/${update.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect((await request('viewer','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({title:'Proposed title',body:'proposed body',version:2});
+
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    const deleteProposal=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'delete',baseVersion:2});
+    expect(deleteProposal.statusCode).toBe(201);
+    expect((await request('editor','POST',`/api/proposals/${deleteProposal.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect(db.prepare('SELECT 1 FROM documents WHERE id=?').get(f.inherited)).toBeUndefined();
+    const retained=db.prepare('SELECT status,target_document_id,body FROM proposals WHERE id=?').get(deleteProposal.json().proposal.id) as {status:string;target_document_id:string;body:string};
+    expect(retained).toMatchObject({status:'approved',target_document_id:f.inherited,body:'proposed body'});
+    const teamQueue=await request('editor','GET',`/api/teams/${f.team}/proposals?status=approved&limit=10`);
+    expect(teamQueue.statusCode).toBe(200);
+    expect(teamQueue.json().proposals.length).toBeGreaterThanOrEqual(3);
+    expect(teamQueue.json().proposals[0]).not.toHaveProperty('body');
+    const editorMine=await request('editor','GET',`/api/teams/${f.team}/proposals?mine=true&status=approved`);
+    expect(editorMine.statusCode).toBe(200);
+    expect(editorMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.editor)).toBe(true);
+    expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
+    const ownerToken=bearerOwner();
+    const agentMine=await app.inject({method:'GET',url:`/api/teams/${f.team}/proposals`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}});
+    expect(agentMine.statusCode).toBe(200);
+    expect(agentMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.owner)).toBe(true);
+    expect((await app.inject({method:'GET',url:`/api/proposals/${createId}`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}})).statusCode).toBe(404);
+    expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
+  });
+  it('rechecks review policy, author permissions and CAS during decision; supports restore and withdraw', async () => {
+    const enabled=await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:true});
+    expect(enabled.statusCode).toBe(200);
+    expect((await request('editor','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:false})).statusCode).toBe(403);
+    const revision=db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(f.inherited) as {id:string};
+    const restore=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'restore',baseVersion:1,revisionId:revision.id});
+    expect(restore.statusCode).toBe(201);
+    const token=bearerOwner();
+    const agentDecision=await app.inject({method:'POST',url:`/api/proposals/${restore.json().proposal.id}/decision`,headers:{authorization:`Bearer ${token}`,origin:'http://localhost:5173','content-type':'application/json'},payload:JSON.stringify({decision:'approve'})});
+    expect(agentDecision.statusCode).toBe(403);
+    expect((await request('editor','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    expect((await request('owner','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    expect((await request('editor','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(200);
+    expect((await request('owner','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({version:2,title:'Open notes'});
+
+    const stale=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:2,title:'Stale proposal',body:'must not publish'});
+    expect(stale.statusCode).toBe(201);
+    expect((await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:false})).statusCode).toBe(200);
+    expect((await request('editor','PATCH',`/api/documents/${f.inherited}`,{title:'Direct v3',body:'direct v3',version:2})).statusCode).toBe(200);
+    expect((await request('owner','PUT',`/api/spaces/${f.teamSpace}/review-policy`,{requireReview:true})).statusCode).toBe(200);
+    const staleDecision=await request('owner','POST',`/api/proposals/${stale.json().proposal.id}/decision`,{decision:'approve'});
+    expect(staleDecision.statusCode).toBe(409);
+    expect((db.prepare('SELECT status FROM proposals WHERE id=?').get(stale.json().proposal.id) as {status:string}).status).toBe('conflicted');
+    expect((await request('owner','GET',`/api/documents/${f.inherited}`)).json().document).toMatchObject({version:3,title:'Direct v3',body:'direct v3'});
+
+    const authorLoss=await request('editor','POST',`/api/documents/${f.inherited}/proposals`,{kind:'update',baseVersion:3,title:'Lost author',body:'blocked'});
+    expect(authorLoss.statusCode).toBe(201);
+    db.prepare("UPDATE members SET role='viewer' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    const lostDecision=await request('owner','POST',`/api/proposals/${authorLoss.json().proposal.id}/decision`,{decision:'approve'});
+    expect(lostDecision.statusCode).toBe(409);
+    expect((db.prepare('SELECT status FROM proposals WHERE id=?').get(authorLoss.json().proposal.id) as {status:string}).status).toBe('conflicted');
+
+    const withdraw=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'delete',baseVersion:3});
+    expect(withdraw.statusCode).toBe(201);
+    expect((await request('owner','POST',`/api/proposals/${withdraw.json().proposal.id}/withdraw`,{})).statusCode).toBe(200);
+    db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
+    expect((await request('editor','POST',`/api/proposals/${withdraw.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(409);
+  });
+
   it('reports team access health with ACL-derived counts, pagination and manager-only access', async () => {
     const response = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=0&limit=1`);
     expect(response.statusCode).toBe(200);

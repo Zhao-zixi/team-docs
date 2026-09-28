@@ -115,7 +115,7 @@ export function openDatabase(dataDir: string): Db {
 
   `);
   const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (currentVersion > 4) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
+  if (currentVersion > 5) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
   if (currentVersion < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tokens (
@@ -167,6 +167,57 @@ export function openDatabase(dataDir: string): Db {
     const spaceColumns = new Set((db.prepare('PRAGMA table_info(spaces)').all() as Array<{ name: string }>).map((column) => column.name));
     if (!spaceColumns.has('require_review')) db.exec('ALTER TABLE spaces ADD COLUMN require_review INTEGER NOT NULL DEFAULT 0 CHECK (require_review IN (0,1))');
     db.exec('PRAGMA user_version = 4');
+  }
+  if (currentVersion < 5) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS document_drafts (
+        id TEXT PRIMARY KEY,
+        doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL CHECK (mode IN ('markdown','rich')),
+        base_version INTEGER NOT NULL CHECK (base_version > 0),
+        state TEXT NOT NULL CHECK (state IN ('editing','reviewing')),
+        y_state BLOB NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 0 CHECK (seq >= 0),
+        title TEXT NOT NULL,
+        updated_by TEXT NOT NULL REFERENCES users(id),
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS document_drafts_editing_idx ON document_drafts(doc_id) WHERE state='editing';
+      CREATE INDEX IF NOT EXISTS document_drafts_doc_idx ON document_drafts(doc_id,updated_at DESC);
+      CREATE TABLE IF NOT EXISTS draft_updates (
+        draft_id TEXT NOT NULL REFERENCES document_drafts(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq > 0),
+        update_blob BLOB NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (draft_id,seq)
+      );
+      CREATE TABLE IF NOT EXISTS proposals (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+        target_document_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('create','update','restore','delete')),
+        author_id TEXT NOT NULL REFERENCES users(id),
+        base_version INTEGER,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        visibility TEXT NOT NULL DEFAULT 'inherit' CHECK (visibility IN ('inherit','restricted')),
+        grants_json TEXT NOT NULL DEFAULT '[]',
+        source_draft_id TEXT REFERENCES document_drafts(id) ON DELETE SET NULL,
+        revision_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','withdrawn','conflicted')),
+        reviewer_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        decision_note TEXT,
+        created_at TEXT NOT NULL,
+        decided_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS proposals_team_idx ON proposals(team_id,status,created_at DESC,id);
+      CREATE INDEX IF NOT EXISTS proposals_author_idx ON proposals(author_id,status,created_at DESC);
+      CREATE INDEX IF NOT EXISTS proposals_document_idx ON proposals(target_document_id,created_at DESC);
+      PRAGMA user_version = 5;
+    `);
   }
   return db;
 }

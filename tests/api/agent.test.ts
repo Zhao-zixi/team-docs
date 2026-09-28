@@ -100,12 +100,14 @@ describe('Agent credentials and REST bearer policy', () => {
     first.exec('DROP TABLE agent_tokens; PRAGMA user_version=1;');
     first.close();
     const migrated = openDatabase(migrationDir);
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4);
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5);
     expect(migrated.prepare("SELECT name FROM teams WHERE id='team-migration'").get()).toEqual({ name: 'Preserve' });
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_tokens'").get()).toBeTruthy();
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'").get()).toBeTruthy();
+    expect((migrated.prepare('PRAGMA table_info(spaces)').all() as Array<{name:string}>).some((column)=>column.name==='require_review')).toBe(true);
     migrated.close();
     const twice = openDatabase(migrationDir);
-    expect((twice.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4);
+    expect((twice.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5);
     twice.close();
     await rm(migrationDir, { recursive: true, force: true });
   });

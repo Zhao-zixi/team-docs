@@ -18,6 +18,7 @@ import { registerAgentCredentialRoutes } from './agentTokens.js';
 import { createTeamShelfMcpHandler } from './mcp.js';
 import { registerMailRoutes } from './mail.js';
 import { registerAccessExplainRoutes } from './accessExplain.js';
+import { registerProposalRoutes } from './proposals.js';
 import type { MailSender } from './mailer.js';
 
 export interface CreateAppOptions {
@@ -136,6 +137,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     registerAgentCredentialRoutes(api, context);
     registerMailRoutes(api, context);
     registerAccessExplainRoutes(api, context);
+    registerProposalRoutes(api, context);
   }, { prefix: '/api' });
   app.route({ method: ['GET', 'POST', 'DELETE'], url: '/mcp', handler: async (request, reply) => {
     const host = request.headers.host;

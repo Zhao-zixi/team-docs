@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { randomUUID as cryptoRandomId } from 'node:crypto';
 import { z } from 'zod';
 import { getDocumentAccess, getSpaceAccess } from './acl.js';
 import type { AppContext } from './context.js';
@@ -13,6 +14,7 @@ const SpaceParams = z.object({ spaceId: Id }).strict();
 const DocumentParams = z.object({ id: Id }).strict();
 const TeamParams = z.object({ teamId: Id }).strict();
 const SubjectQuery = z.object({ userId: Id }).strict();
+const ReviewPolicyBody = z.object({ requireReview: z.boolean() }).strict();
 const Grant = z.object({ userId: Id, role: z.enum(['viewer', 'editor']) }).strict();
 const Grants = z.array(Grant).max(500).superRefine((items, context) => {
   const seen = new Set<string>();
@@ -171,6 +173,20 @@ export function registerAccessExplainRoutes(app: FastifyInstance, { db }: AppCon
     }
     const pageResult = paginate(memberRows, {offset,limit});
     return { members: pageResult.entries, totals, findings, hasMore: pageResult.hasMore, nextOffset: pageResult.nextOffset };
+  });
+
+  app.put('/spaces/:spaceId/review-policy', { preValidation: [validateParams(SpaceParams), validateBody(ReviewPolicyBody)] }, async (request) => {
+    const userId = requireSessionUser(db, request);
+    const { spaceId } = request.params as z.infer<typeof SpaceParams>;
+    const input = request.body as z.infer<typeof ReviewPolicyBody>;
+    const { space } = managerForSpace(db,userId,spaceId);
+    const previous = space.require_review === 1;
+    transaction(db, () => {
+      db.prepare('UPDATE spaces SET require_review=? WHERE id=?').run(input.requireReview ? 1 : 0, spaceId);
+      db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json)
+        VALUES(?,?,?,'space.review_policy.update','space',?,?,?)`).run(cryptoRandomId(),space.team_id,userId,spaceId,new Date().toISOString(),JSON.stringify({previous,requireReview:input.requireReview}));
+    });
+    return { requireReview: input.requireReview };
   });
 
   app.get('/spaces/:spaceId/review-policy', { preValidation: validateParams(SpaceParams) }, async (request) => {
