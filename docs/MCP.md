@@ -37,16 +37,65 @@ PAT 固定绑定一个用户、一个团队、一个 scope 和可选的单空间
 
 PAT 不是 OAuth 登录，也不是浏览器会话。单空间 PAT 只可操作绑定知识库；即使 scope 为 manage，也不能执行团队级成员、邀请、团队改名和审计操作。密码更改、成员离队、凭据过期或撤销、删除绑定空间都会使 PAT 失效。备份恢复会撤销凭据，避免旧快照重新激活已撤销 token。
 
-## HTTP MCP 客户端
+## 个人电脑使用 Codex 连接 TeamShelf
 
-将 PAT 放到客户端的秘密管理功能中，并直接连接同源 HTTPS endpoint。不要将它放进 URL、查询参数、源码、截图、终端命令行、日志或版本库。HTTP 请求使用 `Authorization: Bearer <PAT>`，不能附带 TeamShelf session cookie。
+推荐 Codex 直接使用 TeamShelf 的 Streamable HTTP endpoint。TeamShelf 只接收 `Authorization: Bearer` PAT，不使用浏览器 cookie；PAT 会受创建者当前团队角色、凭据 scope 和知识库 ACL 的共同限制。
 
-```text
-URL: https://nas.example/mcp
-Authorization: Bearer <从 TeamShelf UI 一次性复制的 PAT>
+```mermaid
+flowchart LR
+  PC[个人电脑上的 Codex] -->|HTTPS /mcp + PAT 环境变量| TS[TeamShelf NAS 或本机]
+  TS -->|校验当前用户、团队、scope 和 ACL| DB[(TeamShelf 数据库)]
 ```
 
-本地开发可用 `http://127.0.0.1:<端口>/mcp`。生产环境应配置 TLS，并限制 PAT 的访问范围与有效期。
+1. 在 TeamShelf 网页侧栏打开“Agent / MCP”，创建仅供自己使用的 PAT。初次连接建议选 `read` scope、默认 30 天有效期，并绑定到所需知识库；不需要整队读取时不要选全团队范围。完整 PAT 只显示一次，复制到本机的秘密管理器。不要把 PAT 放入 URL、`config.toml`、shell 配置文件、代码、命令参数、截图或日志。
+2. 在 Codex 用户级 `config.toml` 添加服务器配置。Windows 默认位置为 `%USERPROFILE%\.codex\config.toml`；macOS/Linux 默认位置为 `~/.codex/config.toml`。示例仅保存 endpoint 和环境变量名，不含 token：
+
+```toml
+[mcp_servers.teamshelf]
+url = "https://docs.example.net/mcp"
+bearer_token_env_var = "TEAMSHELF_MCP_TOKEN"
+enabled_tools = ["whoami", "list_spaces", "list_documents", "search_documents", "get_document"]
+```
+
+`docs.example.net` 要替换成用户实际访问 TeamShelf 的 HTTPS 主机名，保留末尾 `/mcp`。服务端 `APP_ORIGIN` 必须配置为相同主机；不要把 PAT 放在 URL 中。若 Codex 与本机 TeamShelf 服务运行于同一台电脑，也可用 `http://127.0.0.1:8080/mcp`（或该服务实际端口）；远程连接 NAS 时使用带有效证书的 HTTPS 地址。
+
+3. 在启动 Codex 的进程环境中临时设置 `TEAMSHELF_MCP_TOKEN`，再从同一终端启动 Codex CLI。PowerShell 7 可用安全输入提示，不会回显输入：
+
+```powershell
+$secure = Read-Host '输入一次性显示的 TeamShelf PAT' -AsSecureString
+$env:TEAMSHELF_MCP_TOKEN = [System.Net.NetworkCredential]::new('', $secure).Password
+codex mcp list
+codex
+Remove-Item Env:TEAMSHELF_MCP_TOKEN
+Remove-Variable secure
+```
+
+macOS/Linux 的 Bash 或 Zsh 可从不回显的提示设置当前 shell 变量：
+
+```sh
+read -rsp 'TeamShelf PAT: ' TEAMSHELF_MCP_TOKEN; printf '\n'
+export TEAMSHELF_MCP_TOKEN
+codex mcp list
+codex
+unset TEAMSHELF_MCP_TOKEN
+```
+
+这些例子只在当前终端会话中保留变量；环境变量仍会以明文提供给 Codex 子进程，因此只在可信个人电脑上使用，并在结束后清除。不要用 `setx`、shell profile、共享 `.env` 或项目级 `.codex/config.toml` 保存 PAT。若希望从系统密码管理器注入变量，请确保它注入到启动 Codex 的进程环境；macOS 从 Dock/Finder 已运行的 Codex 不一定继承终端变量。Codex 桌面版、CLI 与 IDE 扩展共享用户级 MCP 配置；配置或环境变量变化后重启客户端。
+
+4. `codex mcp list` 应显示 `teamshelf` 已启用。启动 Codex 后先让它调用只读 `whoami`，再调用 `list_spaces`；确认返回的是预期团队和可访问知识库。可要求 Codex 只读调用 `list_documents` 并总结一篇文档，以验证完整请求链。配置中的 `enabled_tools` 是额外的客户端 allow-list；服务器端授权仍由 PAT 与 TeamShelf ACL 决定。
+
+遇到连接问题时按下面检查：
+
+| 现象 | 检查 |
+| --- | --- |
+| 找不到 `teamshelf` 或工具列表未更新 | 检查 `config.toml` 位置和 TOML 语法；运行 `codex mcp list`，重启桌面版/IDE。 |
+| 401 或 `whoami` 认证失败 | 确认启动 Codex 的同一进程环境有 `TEAMSHELF_MCP_TOKEN`，PAT 没有多余换行，且未过期、撤销或被密码更改/恢复操作撤销。重新从 UI 签发 PAT。 |
+| 403 或请求主机被拒绝 | 检查 URL 主机与服务端 `APP_ORIGIN` 是否一致；反向代理不要改写 `/mcp` 路径。浏览器 Origin（如果发送）也必须精确匹配 `APP_ORIGIN`。 |
+| MCP endpoint 返回 404 | 检查 URL 是否以 `/mcp` 结尾，以及反向代理是否原样转发这个路径。 |
+| 超时、DNS 或 TLS 错误 | 确认个人电脑能访问 NAS 主机及端口，TLS 证书受信任，反向代理放行 `/mcp`。本机地址 `127.0.0.1` 只能从运行 TeamShelf 的同一台电脑连接。 |
+| 工具调用提示不可见空间/文档，或未列出预期内容 | `read` scope、绑定空间和当前用户 ACL 会共同过滤内容。检查 PAT 所属用户、团队、单空间绑定与当前权限；无需因此改用管理员 PAT。 |
+
+Codex 的 MCP 配置、共享方式和字段以[OpenAI Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)为准。该文档说明 Codex 的配置文件使用 `[mcp_servers.<name>]`，Streamable HTTP 的 `url` 与 `bearer_token_env_var` 为可用字段。其他 MCP 客户端的配置格式各不相同；这里仅给出本项目代码和测试实际覆盖的 TeamShelf endpoint，以及 Codex 原生配置，不承诺未经验证客户端的专有配置格式。
 
 ## 官方 SDK stdio 转发桥
 
