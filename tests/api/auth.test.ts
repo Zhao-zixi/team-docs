@@ -6,7 +6,7 @@ import { createApp } from '../../src/server/app.js';
 import { createSessionAfterPasswordCheck } from '../../src/server/auth.js';
 import type { AppConfig } from '../../src/server/config.js';
 import { openDatabase } from '../../src/server/db.js';
-import { verifyPassword } from '../../src/server/security.js';
+import { isPasswordLength, isStrongNewPassword, verifyPassword } from '../../src/server/security.js';
 import type { Db } from '../../src/server/db.js';
 
 const origin = 'http://localhost:5173';
@@ -91,6 +91,21 @@ describe('setup and session authentication', () => {
     expect(responseData).not.toMatch(/password_hash|passwordHash|token_hash|tokenHash/i);
   });
 
+  it('requires eight Unicode codepoints for new passwords and retains the 128-character and byte limits', async () => {
+    const sevenCodepoints = Array.from({ length: 7 }, (_, index) => String.fromCodePoint(0x1f600 + index)).join('');
+    const eightCodepoints = Array.from({ length: 8 }, (_, index) => String.fromCodePoint(0x1f600 + index)).join('');
+    expect([...sevenCodepoints]).toHaveLength(7);
+    expect([...eightCodepoints]).toHaveLength(8);
+    expect(isStrongNewPassword(sevenCodepoints)).toBe(false);
+    expect(isStrongNewPassword(eightCodepoints)).toBe(true);
+    expect(isPasswordLength('😀'.repeat(128), 8, 128)).toBe(true);
+    expect(isPasswordLength('😀'.repeat(129), 8, 128)).toBe(false);
+    expect(isPasswordLength('😀'.repeat(129), 8, 200)).toBe(false);
+
+    expect((await setup({ password: sevenCodepoints })).statusCode).toBe(400);
+    expect((await setup({ password: eightCodepoints })).statusCode).toBe(201);
+  });
+
   it('sets a random session cookie, stores only its hash, and verifies login and logout', async () => {
     const setupResponse = await setup();
     const cookieHeader = setupResponse.headers['set-cookie'] as string;
@@ -135,16 +150,18 @@ describe('setup and session authentication', () => {
     const setupResponse = await setup();
     const cookie = (setupResponse.headers['set-cookie'] as string).split(';')[0];
     const userId = setupResponse.json().user.id as string;
+    const sevenCodepoints = Array.from({ length: 7 }, (_, index) => String.fromCodePoint(0x1f600 + index)).join('');
+    const eightCodepoints = Array.from({ length: 8 }, (_, index) => String.fromCodePoint(0x1f600 + index)).join('');
     const staleHash = (db.prepare('SELECT password_hash FROM users WHERE id=?').get(userId) as { password_hash: string }).password_hash;
     expect(await verifyPassword(password, staleHash)).toBe(true);
     const weak = await app.inject({
       method: 'POST', url: '/api/auth/password', headers: { ...csrf, cookie },
-      payload: { currentPassword: password, newPassword: 'short' },
+      payload: { currentPassword: password, newPassword: sevenCodepoints },
     });
     expect(weak.statusCode).toBe(400);
     const changed = await app.inject({
       method: 'POST', url: '/api/auth/password', headers: { ...csrf, cookie },
-      payload: { currentPassword: password, newPassword: 'a new correct horse battery staple 8' },
+      payload: { currentPassword: password, newPassword: eightCodepoints },
     });
     expect(changed.statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(401);
@@ -154,7 +171,7 @@ describe('setup and session authentication', () => {
     expect(staleLogin.statusCode).toBe(401);
     const login = await app.inject({
       method: 'POST', url: '/api/auth/login', headers: csrf,
-      payload: { email: 'owner@example.com', password: 'a new correct horse battery staple 8' },
+      payload: { email: 'owner@example.com', password: eightCodepoints },
     });
     expect(login.statusCode).toBe(200);
   });

@@ -63,7 +63,7 @@ export function isPasswordLength(password: string, min: number, max = 128): bool
 
 const COMMON_PASSWORDS = new Set(['password', 'password123', 'password1234', 'password12345', 'password123456', 'password1234567', 'password12345678', 'password123456789', 'qwerty', 'qwerty123', 'letmein', 'welcome', 'admin', 'changeme', 'iloveyou', '123456789012345']);
 export function isStrongNewPassword(password: string): boolean {
-  if (!isPasswordLength(password, 15, 128)) return false;
+  if (!isPasswordLength(password, 8, 128)) return false;
   const normalized = password.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (COMMON_PASSWORDS.has(normalized)) return false;
   if (/^(.)\1{7,}$/.test(password)) return false;

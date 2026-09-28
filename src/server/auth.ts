@@ -12,7 +12,7 @@ const SESSION_COOKIE = 'teamshelf_session';
 export const SESSION_TTL_DAYS = 7;
 const EmailSchema = z.string().trim().email().max(254);
 const NameSchema = z.string().trim().min(1).max(80);
-const PasswordSchema = z.string().refine(isStrongNewPassword, "请设置至少15位且不常见的新密码。");
+const PasswordSchema = z.string().refine(isStrongNewPassword, "请设置至少8个Unicode字符且不常见的新密码。");
 const SetupBodySchema = z.object({
   token: z.string().min(1).max(256), name: NameSchema, email: EmailSchema,
   password: PasswordSchema, teamName: NameSchema,

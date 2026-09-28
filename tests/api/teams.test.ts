@@ -203,5 +203,11 @@ describe('teams, membership, and invitations', () => {
     const weak = await app.inject({ method: 'POST', url: '/api/invitations/' + weakInvite.json().token + '/accept', headers, payload: { name: 'Weak New User', password: 'password123456789' } });
     expect(weak.statusCode).toBe(403);
     expect(db.prepare('SELECT 1 FROM users WHERE normalized_email=?').get('weak-new@example.com')).toBeUndefined();
+
+    const unicodeInvite = await createInvite('unicode-new@example.com', 'viewer');
+    const unicodePassword = Array.from({ length: 8 }, (_, index) => String.fromCodePoint(0x1f600 + index)).join('');
+    const unicodeAccepted = await app.inject({ method: 'POST', url: '/api/invitations/' + unicodeInvite.json().token + '/accept', headers, payload: { name: 'Unicode User', password: unicodePassword } });
+    expect(unicodeAccepted.statusCode).toBe(200);
+    expect(db.prepare('SELECT 1 FROM users WHERE normalized_email=?').get('unicode-new@example.com')).toBeDefined();
   });
 });
