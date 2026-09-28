@@ -377,8 +377,15 @@ describe('content and ACL API', () => {
     expect(response.json().members).toHaveLength(1);
     expect(response.json().hasMore).toBe(true);
     expect(response.json().nextOffset).toBe(1);
-    const viewerHealth = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=1&limit=10`);
-    const viewerRow = viewerHealth.json().members.find((member: {userId:string}) => member.userId === f.viewer);
+    const firstPage = response.json();
+    const secondPage = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=${firstPage.nextOffset}&limit=10`);
+    expect(secondPage.statusCode).toBe(200);
+    expect(secondPage.json().hasMore).toBe(false);
+    expect(secondPage.json().nextOffset).toBeNull();
+    const allMembers = [...firstPage.members, ...secondPage.json().members] as Array<{userId:string;spacesReadable:number;spacesEditable:number;documentsReadable:number;documentsEditable:number}>;
+    expect(allMembers).toHaveLength(response.json().totals.members);
+    expect(new Set(allMembers.map((member) => member.userId)).size).toBe(response.json().totals.members);
+    const viewerRow = allMembers.find((member) => member.userId === f.viewer);
     expect(viewerRow).toMatchObject({spacesReadable:1,spacesEditable:0,documentsReadable:2,documentsEditable:0});
     expect((await request('editor', 'GET', `/api/teams/${f.team}/access/health`)).statusCode).toBe(403);
     const bearer = await app.inject({method:'GET',url:`/api/teams/${f.team}/access/health`,headers:{authorization:`Bearer ${bearerOwner()}`,origin:'http://localhost:5173'}});
