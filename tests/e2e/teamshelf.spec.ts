@@ -29,7 +29,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.getByLabel("密码")).toHaveAttribute("maxlength", "256");
   await page.getByLabel("密码").fill("短密码");
   await page.getByRole("button", { name: "创建团队空间" }).click();
-  await expect(page.getByRole("alert")).toContainText("新密码需要15–128个Unicode字符");
+  await expect(page.getByRole("alert")).toContainText("新密码需要8–128个Unicode字符");
   await page.getByLabel("密码").fill(adminPassword);
   await page.getByRole("button", { name: "创建团队空间" }).click();
   await expect(page.getByRole("heading", { name: "给团队知识，一个好去处。" })).toBeVisible();

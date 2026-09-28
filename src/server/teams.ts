@@ -303,7 +303,7 @@ export function registerTeamRoutes(app: FastifyInstance, { db, config }: AppCont
       if (!(await verifyPassword(body.password, existingUser.password_hash))) throw forbidden('现有账号密码不正确。');
     } else {
       if (!body.name) throw forbidden('新账号需要提供姓名。');
-      if (!isStrongNewPassword(body.password)) throw forbidden('请设置至少15位且不常见的新密码。');
+      if (!isStrongNewPassword(body.password)) throw forbidden('请设置至少8个Unicode字符且不常见的新密码。');
       newPasswordHash = await hashPassword(body.password);
     }
 

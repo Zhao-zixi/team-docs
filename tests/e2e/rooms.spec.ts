@@ -9,7 +9,7 @@ test("external room is usable by an unauthenticated visitor and reveals only pub
   await page.getByLabel("团队名称").fill("资料室测试团队");
   await page.getByLabel("邮箱").fill("room-owner@example.test");
   await page.getByLabel("你的姓名").fill("本地演示管理员");
-  await page.getByLabel("管理员密码（15–128个Unicode字符）").fill(adminPassword);
+await page.getByLabel("管理员密码（8–128个Unicode字符）").fill(adminPassword);
   await page.getByRole("button", { name: "创建团队空间" }).click();
   await expect(page.getByText("团队空间已准备好。")).toBeVisible();
 
