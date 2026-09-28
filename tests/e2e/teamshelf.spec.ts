@@ -137,6 +137,33 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
   await expect(page.locator(".markdown-preview")).toContainText("安全编辑");
 
+  // Independent rails keep the document/editor mounted and persist across reloads.
+  const teamRailToggle = page.getByRole("button", { name: "折叠团队侧栏" });
+  const documentRailToggle = page.getByRole("button", { name: "折叠文档列表" });
+  await teamRailToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "展开团队侧栏" })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#team-sidebar-content")).toBeHidden();
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => Boolean(document.activeElement?.closest("#team-sidebar-content, #document-navigation-content")))).toBe(false);
+  await expect(page.getByLabel("Markdown 正文")).toBeVisible();
+  await documentRailToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "展开文档列表" })).toBeVisible();
+  await expect(page.locator("#document-navigation-content")).toBeHidden();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await page.screenshot({ path: "test-results/screenshots/sidebars-collapsed-desktop.png" });
+  await page.reload();
+  await expect(page.getByRole("button", { name: "展开团队侧栏" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "展开文档列表" })).toBeVisible();
+  await expect(page.locator("#team-sidebar-content")).toBeHidden();
+  await expect(page.locator("#document-navigation-content")).toBeHidden();
+  await expect(page.getByLabel("文档标题")).toHaveValue("团队公开说明");
+  await page.getByRole("button", { name: "展开团队侧栏" }).click();
+  await page.getByRole("button", { name: "展开文档列表" }).click();
+  await expect(page.getByRole("button", { name: "折叠团队侧栏" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "折叠文档列表" })).toBeVisible();
+
   const markdownField = page.getByLabel("Markdown 正文");
   await markdownField.evaluate(element => { const field = element as HTMLTextAreaElement; field.setSelectionRange(0, 5); field.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })); });
   await page.getByRole("button", { name: "段落评论" }).click();
@@ -444,7 +471,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(viewerPage.locator(".markdown-preview")).toContainText("安全编辑");
   await viewerPage.screenshot({ path: "test-results/teamshelf-desktop.png", fullPage: true });
   await viewerPage.setViewportSize({ width: 375, height: 812 });
-  const openMobileNav = viewerPage.getByRole("button", { name: "打开导航" });
+  const openMobileNav = viewerPage.getByRole("button", { name: "打开团队侧栏" });
   await expect(openMobileNav).toBeVisible();
   await expect(viewerPage.locator(".mobile-close")).toBeHidden();
   await openMobileNav.click();
@@ -457,6 +484,16 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await closeMobileNav.click();
   await expect(closeMobileNav).toBeHidden();
   await expect.poll(async () => { const box = await viewerPage.locator(".sidebar").boundingBox(); return box ? box.x + box.width : 0; }).toBeLessThanOrEqual(0);
+  await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  const mobileDocToggle = viewerPage.getByRole("button", { name: "打开文档列表" });
+  await expect(mobileDocToggle).toBeVisible();
+  await mobileDocToggle.click();
+  await expect(viewerPage.locator(".doc-nav")).toBeVisible();
+  await expect(viewerPage.getByLabel("文档标题")).toBeHidden();
+  await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  await viewerPage.screenshot({ path: "test-results/screenshots/document-list-mobile-375.png" });
+  await viewerPage.getByRole("button", { name: "返回文档正文" }).click();
+  await expect(viewerPage.getByLabel("文档标题")).toBeVisible();
   await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await viewerPage.screenshot({ path: "test-results/teamshelf-mobile-375.png", fullPage: true });
 
