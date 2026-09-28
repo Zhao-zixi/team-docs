@@ -159,4 +159,82 @@ compgen -G "$BACKUP_DIR/teamshelf-*.sqlite" >/dev/null
 [[ ! -e "$TMP/dotenv-was-executed" ]]
 ! grep -R -F '$(touch' "$TMP"/*.out >/dev/null
 cmp -s "$TMP/env.before" "$TEST_ROOT/.env"
-printf 'source-up mocks passed: missing-init, project-mismatch, backup recovery, health failure, dotenv literal\n'
+
+# --from-main rejects unsafe source states before any Docker/deployment command.
+cat >"$TMP/bin/git-mock" <<'GITMOCK'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >>"$GIT_MOCK_LOG"
+case "$*" in
+  *'branch --show-current'*) printf '%s\n' "${MOCK_BRANCH:-main}" ;;
+  *'diff --quiet HEAD --'*) [[ "${MOCK_DIRTY:-0}" == 0 ]] ;;
+  *'fetch origin main'*) [[ "${MOCK_FETCH_FAIL:-0}" == 0 ]] ;;
+  *'rev-parse --verify FETCH_HEAD^{commit}'*) printf '%s\n' "${MOCK_FETCHED_SHA:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *'merge-base --is-ancestor HEAD '* ) [[ "${MOCK_NOT_ANCESTOR:-0}" == 0 ]] ;;
+  *'merge --ff-only '* )
+    [[ "${MOCK_MERGE_FAIL:-0}" == 0 ]] || exit 9
+    cat >"$MOCK_UPDATED_SCRIPT" <<'UPDATED'
+#!/usr/bin/env bash
+printf 'updated script ran\n' >>"$MOCK_REENTRY_LOG"
+for arg in "$@"; do printf '<%s>\n' "$arg" >>"$MOCK_REENTRY_ARGS"; done
+exit "${MOCK_REENTRY_STATUS:-0}"
+UPDATED
+    ;;
+  *) exit 8 ;;
+esac
+GITMOCK
+chmod +x "$TMP/bin/git-mock"
+export GIT_BIN="$TMP/bin/git-mock" GIT_MOCK_LOG="$TMP/git.log"
+export MOCK_UPDATED_SCRIPT="$TEST_ROOT/deploy/source-up.sh" MOCK_REENTRY_LOG="$TMP/reentry.log" MOCK_REENTRY_ARGS="$TMP/reentry.args"
+run_from_main() { (cd "$TEST_ROOT" && bash "$TEST_ROOT/deploy/source-up.sh" --from-main --project teamshelf-mock --volume teamshelf-mock-data --backup-dir "$BACKUP_DIR" --origin http://localhost:8080 --port 8181 --cookie-secure false); }
+
+export MOCK_BRANCH=feature MOCK_DIRTY=0 MOCK_FETCH_FAIL=0 MOCK_NOT_ANCESTOR=0 MOCK_MERGE_FAIL=0
+: >"$MOCK_LOG"; : >"$MOCK_EVENTS"; : >"$GIT_MOCK_LOG"
+if run_from_main >"$TMP/from-main-branch.out" 2>&1; then echo 'expected non-main rejection' >&2; exit 1; fi
+grep -q 'only from the main branch' "$TMP/from-main-branch.out"
+[[ ! -s "$MOCK_LOG" && ! -s "$MOCK_EVENTS" ]]
+
+export MOCK_BRANCH=main MOCK_DIRTY=1
+if run_from_main >"$TMP/from-main-dirty.out" 2>&1; then echo 'expected dirty tracked tree rejection' >&2; exit 1; fi
+grep -q 'working tree must be clean' "$TMP/from-main-dirty.out"
+[[ ! -s "$MOCK_LOG" && ! -s "$MOCK_EVENTS" ]]
+
+export MOCK_DIRTY=0 MOCK_FETCH_FAIL=1
+if run_from_main >"$TMP/from-main-fetch.out" 2>&1; then echo 'expected fetch failure' >&2; exit 1; fi
+grep -q 'fetch origin main failed' "$TMP/from-main-fetch.out"
+[[ ! -s "$MOCK_LOG" && ! -s "$MOCK_EVENTS" ]]
+
+export MOCK_FETCH_FAIL=0 MOCK_NOT_ANCESTOR=1
+if run_from_main >"$TMP/from-main-ahead.out" 2>&1; then echo 'expected local-ahead rejection' >&2; exit 1; fi
+grep -q 'ahead of or diverged' "$TMP/from-main-ahead.out"
+[[ ! -s "$MOCK_LOG" && ! -s "$MOCK_EVENTS" ]]
+
+export MOCK_NOT_ANCESTOR=0 MOCK_MERGE_FAIL=1
+if run_from_main >"$TMP/from-main-merge.out" 2>&1; then echo 'expected non-ff merge failure' >&2; exit 1; fi
+grep -q 'merge --ff-only of freshly fetched origin/main failed' "$TMP/from-main-merge.out"
+[[ ! -s "$MOCK_LOG" && ! -s "$MOCK_EVENTS" ]]
+
+# Successful update re-enters the replacement script once, without --from-main, preserving argv.
+export MOCK_MERGE_FAIL=0
+cp "$TEST_ROOT/deploy/source-up.sh" "$TMP/source-up-original.sh"
+rm -f "$MOCK_REENTRY_LOG" "$MOCK_REENTRY_ARGS"
+: >"$GIT_MOCK_LOG"
+run_from_main >"$TMP/from-main-success.out" 2>&1
+[[ "$(cat "$MOCK_REENTRY_LOG")" == 'updated script ran' ]]
+[[ "$(sed -n '1p' "$GIT_MOCK_LOG")" == *'branch --show-current' ]]
+[[ "$(sed -n '2p' "$GIT_MOCK_LOG")" == *'diff --quiet HEAD --' ]]
+[[ "$(sed -n '3p' "$GIT_MOCK_LOG")" == *'fetch origin main' ]]
+[[ "$(sed -n '4p' "$GIT_MOCK_LOG")" == *'rev-parse --verify FETCH_HEAD^{commit}'* ]]
+[[ "$(sed -n '5p' "$GIT_MOCK_LOG")" == *'merge-base --is-ancestor HEAD 0123456789abcdef0123456789abcdef01234567' ]]
+[[ "$(sed -n '6p' "$GIT_MOCK_LOG")" == *'merge --ff-only 0123456789abcdef0123456789abcdef01234567' ]]
+grep -Fx '<--project>' "$MOCK_REENTRY_ARGS" >/dev/null
+grep -Fx '<--backup-dir>' "$MOCK_REENTRY_ARGS" >/dev/null
+grep -Fx "<$BACKUP_DIR>" "$MOCK_REENTRY_ARGS" >/dev/null
+grep -Fx '<--cookie-secure>' "$MOCK_REENTRY_ARGS" >/dev/null
+! grep -Fx '<--from-main>' "$MOCK_REENTRY_ARGS" >/dev/null
+
+cp "$TMP/source-up-original.sh" "$TEST_ROOT/deploy/source-up.sh"
+export MOCK_REENTRY_STATUS=23
+if run_from_main >"$TMP/from-main-exit.out" 2>&1; then echo 'expected updated script exit code propagation' >&2; exit 1; else [[ "$?" == 23 ]]; fi
+unset GIT_BIN GIT_MOCK_LOG MOCK_UPDATED_SCRIPT MOCK_REENTRY_LOG MOCK_REENTRY_ARGS MOCK_REENTRY_STATUS MOCK_FETCHED_SHA
+printf 'source-up mocks passed: deployment preflight/lifecycle, --from-main fail-closed states, ordered ff-only update, updated-script re-entry, argument and exit-code preservation\n'
