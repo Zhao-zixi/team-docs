@@ -115,7 +115,7 @@ export function openDatabase(dataDir: string): Db {
 
   `);
   const currentVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (currentVersion > 3) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
+  if (currentVersion > 4) throw new Error('Database schema version ' + currentVersion + ' is newer than this application supports.');
   if (currentVersion < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_tokens (
@@ -162,6 +162,11 @@ export function openDatabase(dataDir: string): Db {
       ].join('\n'));
       db.exec('PRAGMA user_version = 3');
     });
+  }
+  if (currentVersion < 4) {
+    const spaceColumns = new Set((db.prepare('PRAGMA table_info(spaces)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!spaceColumns.has('require_review')) db.exec('ALTER TABLE spaces ADD COLUMN require_review INTEGER NOT NULL DEFAULT 0 CHECK (require_review IN (0,1))');
+    db.exec('PRAGMA user_version = 4');
   }
   return db;
 }

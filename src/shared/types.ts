@@ -87,3 +87,59 @@ export interface Revision {
   createdAt: string;
   authorName: string;
 }
+
+export type DraftMode = 'markdown' | 'rich';
+export type DraftState = 'editing' | 'reviewing';
+export interface Draft {
+  id: string;
+  documentId: string;
+  mode: DraftMode;
+  baseVersion: number;
+  state: DraftState;
+  seq: number;
+}
+export interface AccessFlags { canRead: boolean; canEdit: boolean; canManage: boolean }
+export interface AccessReason { layer: 'team' | 'space' | 'document'; code: string; visibility?: string; grantRole?: string }
+export interface AccessImpactTotals {
+  membersChanged: number; readGained: number; readLost: number; editGained: number; editLost: number;
+  documentsReadGained: number; documentsReadLost: number; documentsEditGained: number; documentsEditLost: number;
+}
+export interface AccessImpactChange {
+  userId: string; name: string; before: AccessFlags; after: AccessFlags;
+  beforeReasons: AccessReason[]; afterReasons: AccessReason[];
+  documentsReadGained: number; documentsReadLost: number; documentsEditGained: number; documentsEditLost: number;
+}
+export interface AccessImpactPreview {
+  changes: AccessImpactChange[]; totals: AccessImpactTotals; hasMore: boolean; nextOffset: number | null;
+}
+
+
+export type ProposalKind = 'create' | 'update' | 'restore' | 'delete';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'withdrawn' | 'conflicted';
+export interface ProposalSummary {
+  id: string; teamId: string; spaceId: string; documentId: string | null; kind: ProposalKind;
+  authorId: string; authorName: string; baseVersion: number | null; title: string; status: ProposalStatus;
+  reviewerId: string | null; decisionNote: string | null; createdAt: string; decidedAt: string | null;
+}
+export interface Proposal extends ProposalSummary { body: string; sourceDraftId: string | null }
+
+export type CommentSource =
+  | { kind: 'published'; version: number }
+  | { kind: 'draft'; draftId: string; seq: number }
+  | { kind: 'proposal'; proposalId: string };
+export interface CommentAnchor { paragraphIndex: number; startOffset: number; endOffset: number }
+export interface DocumentComment {
+  id: string; documentId: string; parentId: string | null; source: CommentSource; quote: string; anchor: CommentAnchor;
+  body: string; authorId: string; authorName: string; mentionUserIds: string[]; resolved: boolean; stale: boolean;
+  createdAt: string; updatedAt: string; replies?: DocumentComment[];
+}
+export interface DocumentWorkflow {
+  documentId: string; responsibleUserId: string | null; responsibleName: string | null;
+  reviewAt: string | null; dueAt: string | null; status: 'draft' | 'in_review' | 'published'; metadataVersion: number;
+}
+export interface TeamReminderSettings { enabled: boolean; senderUserId: string | null }
+export interface ExternalRoomSummary {
+  id: string; teamId: string; name: string; expiresAt: string; revokedAt: string | null;
+  itemCount: number; createdAt: string; createdBy: string; lastAccessAt: string | null;
+}
+export interface ExternalRoomItem { documentId: string; publishedVersion: number; title: string }

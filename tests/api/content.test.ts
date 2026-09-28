@@ -111,6 +111,14 @@ function request(user: keyof Fixture['tokens'], method: 'GET' | 'POST' | 'PATCH'
   return app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
 }
 
+function bearerOwner() {
+  const token = `ts_agent_${randomUUID().replaceAll('-', '')}`;
+  const now = isoNow();
+  db.prepare(`INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at)
+    VALUES(?,?,?,NULL,'review test','manage',?, 'test…token',?,?)`)
+    .run(randomUUID(), f.owner, f.team, hashToken(token), now, new Date(Date.now() + 86_400_000).toISOString());
+  return token;
+}
 function docAccess(userId: string, documentId: string, role: string) {
   addGrant('document_grants', 'document_id', documentId, userId, role);
 }
@@ -251,5 +259,73 @@ describe('content and ACL API', () => {
     expect(extra.statusCode).toBe(400);
     const badTitle = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: '   ', body: '' });
     expect(badTitle.statusCode).toBe(400);
+  });
+  it('explains effective access and previews space/document ACL changes without side effects', async () => {
+    const explanation = await request('owner', 'GET', `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`);
+    expect(explanation.statusCode).toBe(200);
+    expect(explanation.json().effective).toEqual({ canRead: true, canEdit: false, canManage: false });
+    expect(explanation.json().reasons.some((reason: { layer: string; code: string }) => reason.layer === 'space' && reason.code === 'space_grant')).toBe(true);
+    expect((await request('spaceViewer', 'GET', `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`)).statusCode).toBe(403);
+    expect((await request('owner', 'GET', `/api/spaces/${f.otherSpace}/access/explain?userId=${f.otherOwner}`)).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`, headers: { authorization: `Bearer ${bearerOwner()}`, origin: 'http://localhost:5173' } })).statusCode).toBe(403);
+
+    const spaceBefore = db.prepare('SELECT visibility FROM spaces WHERE id=?').get(f.teamSpace) as { visibility: string };
+    const spacePreview = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/access/preview`, {
+      visibility: 'restricted', grants: [{ userId: f.viewer, role: 'viewer' }], offset: 0, limit: 1,
+    });
+    expect(spacePreview.statusCode).toBe(200);
+    expect(spacePreview.json().totals.membersChanged).toBeGreaterThan(0);
+    expect(spacePreview.json().totals.documentsReadLost).toBeGreaterThan(0);
+    expect(spacePreview.json().hasMore).toBe(true);
+    expect((db.prepare('SELECT visibility FROM spaces WHERE id=?').get(f.teamSpace) as { visibility: string }).visibility).toBe(spaceBefore.visibility);
+    expect(db.prepare('SELECT 1 FROM space_grants WHERE space_id=?').get(f.teamSpace)).toBeUndefined();
+
+    const docPreview = await request('owner', 'POST', `/api/documents/${f.docRestricted}/access/preview`, {
+      visibility: 'restricted', grants: [],
+    });
+    expect(docPreview.statusCode).toBe(200);
+    expect(docPreview.json().totals.readLost).toBeGreaterThan(0);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM document_grants WHERE document_id=?').get(f.docRestricted)).toEqual({ count: 2 });
+    expect((await request('editor', 'POST', `/api/documents/${f.docRestricted}/access/preview`, { visibility: 'inherit', grants: [] })).statusCode).toBe(403);
+    expect((await request('owner', 'POST', `/api/documents/${f.otherDoc}/access/preview`, { visibility: 'inherit', grants: [] })).statusCode).toBe(404);
+  });
+
+  it('reports team access health with ACL-derived counts, pagination and manager-only access', async () => {
+    const response = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=0&limit=1`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().totals).toMatchObject({ members: 5, spaces: 2, documents: 4 });
+    expect(response.json().members).toHaveLength(1);
+    expect(response.json().hasMore).toBe(true);
+    expect(response.json().nextOffset).toBe(1);
+    const viewerHealth = await request('owner', 'GET', `/api/teams/${f.team}/access/health?offset=1&limit=10`);
+    const viewerRow = viewerHealth.json().members.find((member: {userId:string}) => member.userId === f.viewer);
+    expect(viewerRow).toMatchObject({spacesReadable:1,spacesEditable:0,documentsReadable:2,documentsEditable:0});
+    expect((await request('editor', 'GET', `/api/teams/${f.team}/access/health`)).statusCode).toBe(403);
+    const bearer = await app.inject({method:'GET',url:`/api/teams/${f.team}/access/health`,headers:{authorization:`Bearer ${bearerOwner()}`,origin:'http://localhost:5173'}});
+    expect(bearer.statusCode).toBe(403);
+    expect((await request('owner', 'GET', `/api/teams/${f.otherTeam}/access/health`)).statusCode).toBe(404);
+  });
+  it('blocks all direct document mutations in review-required spaces without altering published state', async () => {
+    db.prepare('UPDATE spaces SET require_review=1 WHERE id=?').run(f.teamSpace);
+    const policy = await request('owner', 'GET', `/api/spaces/${f.teamSpace}/review-policy`);
+    expect(policy.statusCode).toBe(200);
+    expect(policy.json()).toEqual({ requireReview: true });
+    expect((await request('editor', 'GET', `/api/spaces/${f.teamSpace}/review-policy`)).statusCode).toBe(403);
+
+    const created = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/documents`, { title: 'Blocked', body: 'draft' });
+    const patched = await request('editor', 'PATCH', `/api/documents/${f.inherited}`, { title: 'Blocked', body: 'new body', version: 1 });
+    const restored = await request('owner', 'POST', `/api/documents/${f.inherited}/revisions/${db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(f.inherited)?.id}/restore`, { version: 1 });
+    const deleted = await request('owner', 'DELETE', `/api/documents/${f.inherited}`);
+    for (const response of [created, patched, restored, deleted]) {
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('REVIEW_REQUIRED');
+    }
+    expect((await request('owner', 'GET', `/api/documents/${f.inherited}`)).json().document).toMatchObject({ version: 1, body: '# Visible needle\n**Markdown** stays intact.' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(f.teamSpace)).toEqual({ count: 2 });
+
+    const token = bearerOwner();
+    const mcpRest = await app.inject({ method: 'PATCH', url: `/api/documents/${f.inherited}`, headers: { authorization: `Bearer ${token}`, origin: 'http://localhost:5173', 'content-type': 'application/json' }, payload: JSON.stringify({ title: 'Agent blocked', body: 'blocked', version: 1 }) });
+    expect(mcpRest.statusCode).toBe(409);
+    expect(mcpRest.json().error.code).toBe('REVIEW_REQUIRED');
   });
 });
