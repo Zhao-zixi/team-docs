@@ -117,6 +117,62 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(viewerPage.getByRole("heading", { name: "给团队知识，一个好去处。" })).toBeVisible();
 
   await membersDialog.getByRole("button", { name: "关闭对话框" }).click();
+  await page.getByRole("button", { name: "新建知识库" }).click();
+  const longSpaceDialog = page.getByRole("dialog");
+  await longSpaceDialog.getByLabel("知识库名称").fill("文档库使用说明");
+  await longSpaceDialog.getByLabel("简介").fill("长标题排版回归用知识库。");
+  await longSpaceDialog.getByRole("button", { name: "创建知识库" }).click();
+  const spaceTitle = page.locator(".doc-nav-title h1");
+  const spaceActions = page.locator(".space-title-actions");
+  await expect(spaceTitle).toHaveText("文档库使用说明");
+  await expect(spaceActions.getByRole("button", { name: "折叠文档列表" })).toBeVisible();
+  const assertSpaceHeadingLayout = async (width: number) => {
+    const layout = await page.evaluate(() => {
+      const title = document.querySelector(".doc-nav-title h1")!;
+      const actions = document.querySelector(".space-title-actions")!;
+      const titleBox = title.getBoundingClientRect();
+      const actionsBox = actions.getBoundingClientRect();
+      const docNavBox = document.querySelector(".doc-nav")!.getBoundingClientRect();
+      const style = getComputedStyle(title);
+      return {
+        docNavLeft: docNavBox.left,
+        docNavWidth: docNavBox.width,
+        titleWidth: titleBox.width,
+        titleHeight: titleBox.height,
+        fontSize: Number.parseFloat(style.fontSize),
+        titleBottom: titleBox.bottom,
+        actionsTop: actionsBox.top,
+        hasHorizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+      };
+    });
+    expect(layout.titleWidth).toBeGreaterThan(200);
+    expect(layout.titleHeight).toBeLessThan(layout.fontSize * 2.5);
+    expect(layout.titleBottom).toBeLessThanOrEqual(layout.actionsTop);
+    expect(layout.hasHorizontalOverflow).toBe(false);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    if (width <= 760) {
+      expect(layout.docNavLeft).toBeGreaterThanOrEqual(0);
+      expect(layout.docNavLeft + layout.docNavWidth).toBeLessThanOrEqual(width);
+      expect(layout.docNavWidth).toBeGreaterThan(width - 20);
+    }
+  };
+  await assertSpaceHeadingLayout(1440);
+  await page.screenshot({ path: "test-results/screenshots/space-heading-desktop.png" });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.getByRole("button", { name: "打开团队侧栏" }).click();
+  await page.locator(".space-link").filter({ hasText: "文档库使用说明" }).click();
+  const closeSpaceMobileSidebar = page.getByRole("button", { name: "关闭导航" });
+  if (await closeSpaceMobileSidebar.isVisible()) await closeSpaceMobileSidebar.click();
+  await expect.poll(async () => {
+    const box = await page.locator(".sidebar").boundingBox();
+    return box ? box.x + box.width : 0;
+  }).toBeLessThanOrEqual(0);
+  await expect(spaceTitle).toBeVisible();
+  await expect(page.locator(".doc-nav")).toBeVisible();
+  await expect(spaceActions.getByRole("button", { name: "新建文档" })).toBeVisible();
+  await assertSpaceHeadingLayout(375);
+  await page.screenshot({ path: "test-results/screenshots/space-heading-mobile-375.png" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole("button", { name: "新建文档" }).click();
   let createDialog = page.getByRole("dialog");
   await createDialog.getByLabel("文档标题").fill("团队公开说明");
