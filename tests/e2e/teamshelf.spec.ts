@@ -308,14 +308,48 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.locator(".toast[role=status]")).toContainText("此知识库已启用提交审阅");
 
   const childTitle = "分页树下的子文档";
-  await page.getByRole("button", { name: "新建子文档" }).click();
+  await page.getByRole("button", { name: "返回查看" }).click();
+  const viewChildAction = page.locator(".toolbar-actions").getByRole("button", { name: "在“团队公开说明”下新建子文档" });
+  await expect(viewChildAction).toBeVisible();
+  await viewChildAction.click();
+  const viewChildDialog = page.getByRole("dialog");
+  await expect(viewChildDialog.getByText("父文档：团队公开说明")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`doc=${publicDocId}`));
+  await viewChildDialog.getByRole("button", { name: "关闭对话框" }).click();
+
+  await page.getByRole("button", { name: "编辑文档" }).click();
+  const childProtectionDraft = page.locator(".source-editor");
+  await childProtectionDraft.fill((await childProtectionDraft.inputValue()) + "\n\n子文档弹窗保护草稿");
+  const differentParent = page.locator(".document-row").filter({ hasText: "分页填充-001" });
+  const differentParentAction = differentParent.getByRole("button", { name: "在“分页填充-001”下新建子文档" });
+  await differentParent.scrollIntoViewIfNeeded();
+  await expect(differentParentAction).toBeVisible();
+  const dismissChildNavigation = page.waitForEvent("dialog").then(async dialog => {
+    expect(dialog.message()).toContain("未保存的修改");
+    await dialog.dismiss();
+  });
+  await Promise.all([dismissChildNavigation, differentParentAction.click()]);
+  await expect(childProtectionDraft).toHaveValue(/子文档弹窗保护草稿/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const acceptChildNavigation = page.waitForEvent("dialog").then(async dialog => {
+    expect(dialog.message()).toContain("未保存的修改");
+    await dialog.accept();
+  });
+  await Promise.all([acceptChildNavigation, differentParentAction.click()]);
   const childDialog = page.getByRole("dialog");
-  await expect(childDialog.getByText("父文档：团队公开说明")).toBeVisible();
+  await expect(childDialog.getByText("父文档：分页填充-001")).toBeVisible();
+  await expect(childProtectionDraft).toHaveValue(/子文档弹窗保护草稿/);
   await childDialog.getByLabel("文档标题").fill(childTitle);
   await childDialog.getByLabel("Markdown 正文").fill("这篇子文档用于验证父子关系和审阅流程。");
   await childDialog.getByRole("button", { name: "创建文档" }).click();
   await expect(page.locator(".toast[role=status]")).toContainText("子文档提案已提交");
   await expect(page.locator(".document-link").filter({ hasText: childTitle })).toHaveCount(0);
+  await page.evaluate(async id => {
+    const me = await (await fetch("/api/auth/me", { credentials: "same-origin" })).json();
+    sessionStorage.removeItem(`teamshelf:draft:${me.user.id}:${id}`);
+  }, publicDocId);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
 
   await reviewerPage.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
   await expect(reviewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
@@ -323,16 +357,16 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const childReviewPanel = reviewerPage.getByRole("region", { name: "提案审阅" });
   await childReviewPanel.getByRole("button", { name: new RegExp(childTitle) }).click();
   const childProposalDetail = reviewerPage.getByRole("dialog", { name: childTitle });
-  await expect(childProposalDetail.getByText("父文档：团队公开说明")).toBeVisible();
+  await expect(childProposalDetail.getByText("父文档：分页填充-001")).toBeVisible();
   await childProposalDetail.getByRole("button", { name: "批准提案" }).click();
   await page.reload();
   await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
-  const parentTreeRow = page.locator(".document-link").filter({ hasText: "团队公开说明" });
+  const parentTreeRow = page.locator(".document-link").filter({ hasText: "分页填充-001" });
   const childTreeRow = page.locator(".document-link").filter({ hasText: childTitle });
   await expect(parentTreeRow).toHaveAttribute("data-document-depth", "0");
   await expect(childTreeRow).toHaveAttribute("data-document-depth", "1");
   const treeOrder = await page.locator(".document-link").evaluateAll(rows => ({
-    parent: rows.findIndex(row => row.textContent?.includes("团队公开说明")),
+    parent: rows.findIndex(row => row.textContent?.includes("分页填充-001")),
     child: rows.findIndex(row => row.textContent?.includes("分页树下的子文档")),
   }));
   expect(treeOrder.child).toBe(treeOrder.parent + 1);
@@ -343,12 +377,17 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(page.locator(".doc-nav")).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await childTreeRow.scrollIntoViewIfNeeded();
+  await expect(differentParentAction).toBeVisible();
+  await expect(differentParentAction.locator("svg")).toBeVisible();
   await page.screenshot({ path: "test-results/screenshots/document-tree-mobile-375.png" });
   await page.getByRole("button", { name: "返回文档正文" }).click();
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await parentTreeRow.click();
+  await expect(page.getByRole("heading", { name: "分页填充-001" })).toBeVisible();
   await page.getByRole("button", { name: "删除文档" }).click();
   await expect(page.locator(".toast[role=status]")).toContainText("包含 1 个子文档，不能删除");
-
+  await page.locator(".document-link").filter({ hasText: "团队公开说明" }).click();
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await enterDocumentEdit(page);
   const proposalEditor = page.getByLabel("Markdown 正文");
   await proposalEditor.fill((await proposalEditor.inputValue()) + "\n\n提交审核的内容");
@@ -589,7 +628,8 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(viewerPage.getByRole("button", { name: "编辑文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "继续编辑草稿" })).toHaveCount(0);
   await expect(viewerPage.getByLabel("Markdown 正文")).toHaveCount(0);
-  await expect(viewerPage.getByRole("button", { name: "新建子文档" })).toHaveCount(0);
+  await expect(viewerPage.locator(".document-child-create")).toHaveCount(0);
+  await expect(viewerPage.locator(".toolbar-actions .child-document-button")).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "新建文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "保存", exact: true })).toHaveCount(0);
   await expect(viewerPage.locator(".markdown-preview")).toContainText("安全编辑");
@@ -679,7 +719,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
     await route.fulfill({ response });
   });
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "延迟响应目标" }).click();
+  await page.locator(".document-link").filter({ hasText: "延迟响应目标" }).click();
   await fetchStarted;
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "退出登录" }).click();
