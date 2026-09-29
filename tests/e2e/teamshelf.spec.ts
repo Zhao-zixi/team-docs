@@ -125,7 +125,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const spaceTitle = page.locator(".doc-nav-title h1");
   const spaceActions = page.locator(".space-title-actions");
   await expect(spaceTitle).toHaveText("文档库使用说明");
-  await expect(spaceActions.getByRole("button", { name: "折叠文档列表" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "折叠文档列表" })).toBeVisible();
   const assertSpaceHeadingLayout = async (width: number) => {
     const layout = await page.evaluate(() => {
       const title = document.querySelector(".doc-nav-title h1")!;
@@ -170,6 +170,9 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(spaceTitle).toBeVisible();
   await expect(page.locator(".doc-nav")).toBeVisible();
   await expect(spaceActions.getByRole("button", { name: "新建文档" })).toBeVisible();
+  await expect(page.locator(".pane-edge-toggle")).toHaveCount(2);
+  await expect(page.locator(".pane-edge-toggle").first()).toBeHidden();
+  await expect(page.locator(".pane-edge-toggle").last()).toBeHidden();
   await assertSpaceHeadingLayout(375);
   await page.screenshot({ path: "test-results/screenshots/space-heading-mobile-375.png" });
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -267,9 +270,38 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   // Independent rails keep the document/editor mounted and persist across reloads.
   const teamRailToggle = page.getByRole("button", { name: "折叠团队侧栏" });
   const documentRailToggle = page.getByRole("button", { name: "折叠文档列表" });
+  const finePointer = await page.evaluate(() => matchMedia("(hover: hover) and (pointer: fine)").matches);
+  const handleCenterY = async (toggle: typeof teamRailToggle, pane: ReturnType<typeof page.locator>) => {
+    const handleBox = await toggle.boundingBox();
+    const paneBox = await pane.boundingBox();
+    expect(handleBox).not.toBeNull();
+    expect(paneBox).not.toBeNull();
+    return (handleBox!.y + handleBox!.height / 2) - (paneBox!.y + paneBox!.height / 2);
+  };
+  const initialTeamCenterOffset = await handleCenterY(teamRailToggle, page.locator(".sidebar"));
+  const initialDocumentCenterOffset = await handleCenterY(documentRailToggle, page.locator(".doc-nav"));
+  for (const [toggle, pane] of [[teamRailToggle, page.locator(".sidebar")], [documentRailToggle, page.locator(".doc-nav")]] as const) {
+    const paneBox = await pane.boundingBox();
+    const handleBox = await toggle.boundingBox();
+    expect(paneBox).not.toBeNull();
+    expect(handleBox).not.toBeNull();
+    expect(Math.abs((handleBox!.y + handleBox!.height / 2) - (paneBox!.y + paneBox!.height / 2))).toBeLessThan(2);
+    expect(Math.abs((handleBox!.x + handleBox!.width) - (paneBox!.x + paneBox!.width))).toBeLessThan(2);
+    if (finePointer) {
+      await page.mouse.move(paneBox!.x + paneBox!.width / 2, paneBox!.y + paneBox!.height / 2);
+      await expect.poll(() => toggle.evaluate(element => Number(getComputedStyle(element).opacity))).toBeLessThan(0.2);
+      await toggle.hover();
+      await expect.poll(() => toggle.evaluate(element => Number(getComputedStyle(element).opacity))).toBeGreaterThan(0.9);
+      if (toggle === teamRailToggle) await page.screenshot({ path: "test-results/screenshots/sidebars-edge-hover-desktop.png" });
+    }
+  }
+  await page.mouse.move(5, 5);
+  await page.screenshot({ path: "test-results/screenshots/sidebars-edge-default-desktop.png" });
   await teamRailToggle.focus();
+  if (finePointer) await expect.poll(() => teamRailToggle.evaluate(element => Number(getComputedStyle(element).opacity))).toBeGreaterThan(0.9);
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "展开团队侧栏" })).toHaveAttribute("aria-expanded", "false");
+  expect(Math.abs(await handleCenterY(page.getByRole("button", { name: "展开团队侧栏" }), page.locator(".sidebar")) - initialTeamCenterOffset)).toBeLessThan(2);
   await expect(page.locator("#team-sidebar-content")).toBeHidden();
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => Boolean(document.activeElement?.closest("#team-sidebar-content, #document-navigation-content")))).toBe(false);
@@ -277,6 +309,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await documentRailToggle.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "展开文档列表" })).toBeVisible();
+  expect(Math.abs(await handleCenterY(page.getByRole("button", { name: "展开文档列表" }), page.locator(".doc-nav")) - initialDocumentCenterOffset)).toBeLessThan(2);
   await expect(page.locator("#document-navigation-content")).toBeHidden();
   await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await page.screenshot({ path: "test-results/screenshots/sidebars-collapsed-desktop.png" });
