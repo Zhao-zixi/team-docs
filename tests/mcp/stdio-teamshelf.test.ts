@@ -11,10 +11,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/server/app.js';
 import { openDatabase, type Db } from '../../src/server/db.js';
 import type { AppConfig } from '../../src/server/config.js';
-import { hashToken, isoNow } from '../../src/server/security.js';
+import { hashPassword, isoNow } from '../../src/server/security.js';
 
 const distBridge = path.resolve('dist/mcp/stdio.js');
-const secret = `ts_agent_${'production-bridge-test-secret'.padEnd(40, 'x')}`;
+const secret = 'production-bridge-test-password-42';
 const tempDirs: string[] = [];
 const apps: ReturnType<typeof createApp>[] = [];
 const databases: Db[] = [];
@@ -33,26 +33,25 @@ afterEach(async () => {
 });
 
 describe('production stdio bridge to TeamShelf HTTP MCP', () => {
-  it.skipIf(skipped)('uses the production dist bridge to read real TeamShelf data and observes token revocation', async () => {
+  it.skipIf(skipped)('uses the production dist bridge for account auth and observes password changes', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-stdio-real-'));
     tempDirs.push(dir);
     const db: Db = openDatabase(dir);
     databases.push(db);
-    const userId = randomUUID(); const teamId = randomUUID(); const spaceId = randomUUID(); const documentId = randomUUID(); const credentialId = randomUUID();
+    const userId = randomUUID(); const teamId = randomUUID(); const spaceId = randomUUID(); const documentId = randomUUID();
     const now = isoNow();
-    db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)').run(userId, 'stdio@example.invalid', 'stdio@example.invalid', 'Stdio Test', 'unused', now);
+    db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)').run(userId, 'stdio@example.invalid', 'stdio@example.invalid', 'Stdio Test', await hashPassword(secret), now);
     db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(teamId, 'Stdio Live Team', now);
-    db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(teamId, userId, 'owner', now);
+    db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(teamId, userId, 'viewer', now);
     db.prepare("INSERT INTO spaces(id,team_id,name,description,visibility,created_by,created_at) VALUES(?,?,?,'','team',?,?)").run(spaceId, teamId, 'Live Space', userId, now);
     db.prepare("INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,'Production bridge body','inherit',1,?,?,?,?)").run(documentId, spaceId, 'Live MCP document', userId, now, userId, now);
     db.prepare('INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name) VALUES(?,?,1,?,?,?,?,?)').run(randomUUID(), documentId, 'Live MCP document', 'Production bridge body', now, userId, 'Stdio Test');
-    db.prepare('INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(credentialId, userId, teamId, null, 'stdio smoke', 'read', hashToken(secret), 'hint', now, new Date(Date.now() + 86_400_000).toISOString());
     const config: AppConfig = { port: 0, dataDir: dir, appOrigin: 'http://127.0.0.1', setupToken: '', cookieSecure: false, isProduction: false };
     const app = createApp({ db, config, logger: false, serveClient: false });
     apps.push(app);
     const address = await app.listen({ port: 0, host: '127.0.0.1' });
     const endpoint = new URL('/mcp', address).href;
-    const transport = new StdioClientTransport({ command: process.execPath, args: [distBridge], cwd: process.cwd(), env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_TOKEN: secret }, stderr: 'pipe' });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [distBridge], cwd: process.cwd(), env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_EMAIL: 'stdio@example.invalid', TEAMSHELF_MCP_PASSWORD: secret }, stderr: 'pipe' });
     transports.push(transport);
     let stderr = '';
     const child = (transport as unknown as { _process?: ChildProcess })._process;
@@ -66,7 +65,7 @@ describe('production stdio bridge to TeamShelf HTTP MCP', () => {
     const read = await client.callTool({ name: 'get_document', arguments: { documentId } });
     expect(JSON.stringify(read)).toContain('Production bridge body');
     expect(JSON.stringify(read)).toContain('Live MCP document');
-    db.prepare('UPDATE agent_tokens SET revoked_at=? WHERE id=?').run(isoNow(), credentialId);
+    db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(await hashPassword('stdio-password-rotated-73'), userId);
     let rejection = '';
     try { await client.callTool({ name: 'whoami', arguments: {} }); }
     catch (error) { rejection = error instanceof Error ? error.message : 'error'; }
@@ -74,5 +73,11 @@ describe('production stdio bridge to TeamShelf HTTP MCP', () => {
     expect(rejection).not.toContain(secret);
     await client.close();
     expect(stderr).not.toContain(secret);
+
+    const renewedTransport = new StdioClientTransport({ command: process.execPath, args: [distBridge], cwd: process.cwd(), env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_EMAIL: 'stdio@example.invalid', TEAMSHELF_MCP_PASSWORD: 'stdio-password-rotated-73' }, stderr: 'pipe' });
+    transports.push(renewedTransport);
+    const renewedClient = new Client({ name: 'teamshelf-production-stdio-renewed-test', version: '1.0.0' }); clients.push(renewedClient);
+    await renewedClient.connect(renewedTransport);
+    expect((await renewedClient.callTool({ name: 'list_teams', arguments: {} })).isError).not.toBe(true);
   });
 });

@@ -55,7 +55,7 @@
   <text x="154" y="514" class="cardTitle">AI Agent</text>
   <text x="96" y="573" class="label">官方 MCP Client / stdio 桥</text>
   <rect x="96" y="591" width="206" height="29" rx="14" fill="#fff2df"/>
-  <text x="112" y="610" fill="#9b682e" font-size="12" font-weight="600">单独签发的 Bearer PAT</text>
+  <text x="112" y="610" fill="#9b682e" font-size="12" font-weight="600">成员登录邮箱与密码</text>
   <text x="96" y="650" class="small">可限权限等级、有效期与单一知识库</text>
 
   <!-- TeamShelf boundary -->
@@ -74,7 +74,7 @@
   <rect x="500" y="279" width="244" height="92" rx="14" class="card"/>
   <text x="522" y="309" class="cardTitle" font-size="16">MCP HTTP /mcp</text>
   <text x="522" y="337" class="label">工具列表与工具调用</text>
-  <text x="522" y="357" class="small">每次调用重新验证 PAT</text>
+  <text x="522" y="357" class="small">每次操作重验成员身份与权限</text>
 
   <rect x="500" y="394" width="514" height="81" rx="14" fill="#fff" stroke="#ead8ba" stroke-width="1.5"/>
   <text x="522" y="423" fill="#805e31" font-size="15" font-weight="700">身份入口分别认证，资源操作统一检查</text>
@@ -91,7 +91,7 @@
   <rect x="856" y="548" width="134" height="34" rx="9" class="tag"/>
   <text x="870" y="570" class="tagText">知识库范围</text>
   <text x="522" y="612" class="label">再检查对象 ACL 与资源当前状态</text>
-  <text x="522" y="640" class="small">PAT 不能扩大成员权限；撤销、过期或撤权会阻止后续调用</text>
+  <text x="522" y="640" class="small">角色和 ACL 按最新状态生效；无需另签 MCP 密钥</text>
 
   <!-- Storage -->
   <rect x="1160" y="240" width="220" height="160" rx="18" class="card"/>
@@ -113,12 +113,12 @@
   <path d="M355 280 C455 260 690 260 890 279" class="line"/>
   <text x="392" y="265" class="small">浏览器会话</text>
   <path d="M355 570 C420 570 430 325 500 325" class="lineGold"/>
-  <text x="401" y="526" fill="#a87739" font-size="12">HTTPS + Bearer PAT</text>
+  <text x="401" y="526" fill="#a87739" font-size="12">HTTPS + Basic 账号认证</text>
   <path d="M744 325 C760 325 755 325 770 325" class="line"/>
   <path d="M890 371 C890 385 850 385 850 394" class="line"/>
   <path d="M1014 580 C1090 580 1080 320 1160 320" class="line"/>
   <path d="M1270 400 L1270 470" class="lineGold"/>
 
-  <text x="72" y="758" class="small">Agent 凭据只在签发时显示一次；示意图不包含真实密钥、用户数据或网络字体。</text>
+  <text x="72" y="758" class="small">MCP 使用成员现有账号；示意图不包含真实密码、用户数据或网络字体。</text>
   <text x="1159" y="758" class="small">数据留在自托管环境</text>
 </svg>

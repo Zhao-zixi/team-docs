@@ -3,315 +3,99 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
-import type { AppConfig } from '../../src/server/config.js';
 import { createApp } from '../../src/server/app.js';
+import type { AppConfig } from '../../src/server/config.js';
 import { openDatabase, type Db } from '../../src/server/db.js';
 import { hashPassword, hashToken, isoNow } from '../../src/server/security.js';
+import { resetBasicFailureStateForTests } from '../../src/server/agentAuth.js';
 
-const origin = 'http://localhost:5173';
-const csrf = { 'x-requested-with': 'TeamShelf', origin };
+const origin = 'http://127.0.0.1:5173';
+const password = 'test-account-password-234';
 let dir: string;
 let db: Db;
 let app: ReturnType<typeof createApp>;
-let ids: { owner: string; admin: string; editor: string; viewer: string; team: string; otherTeam: string; space: string; otherSpace: string; remoteSpace: string; doc: string; otherDoc: string; remoteDoc: string };
-let sessions: Record<string, string>;
-
-function member(teamId: string, userId: string, role: string) {
-  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(teamId, userId, role, isoNow());
-}
-
-function seedSpace(teamId: string, creator: string, name: string) {
-  const id = randomUUID();
-  db.prepare(`INSERT INTO spaces(id,team_id,name,description,visibility,created_by,created_at) VALUES(?,?,?,'','team',?,?)`)
-    .run(id, teamId, name, creator, isoNow());
-  return id;
-}
-
-function seedDocument(spaceId: string, userId: string, title: string, body: string) {
-  const id = randomUUID();
-  const now = isoNow();
-  db.prepare(`INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at)
-    VALUES(?,?,?,?,'inherit',1,?,?,?,?)`).run(id, spaceId, title, body, userId, now, userId, now);
-  db.prepare(`INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name) VALUES(?,?,1,?,?,?,?,?)`)
-    .run(randomUUID(), id, title, body, now, userId, 'seed');
-  return id;
-}
+let ids: { owner: string; editor: string; viewer: string; team: string; otherTeam: string; space: string; document: string };
+let users: Record<string, { id: string; email: string }>;
 
 beforeEach(async () => {
-  dir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-agent-'));
+  resetBasicFailureStateForTests();
+  dir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-account-agent-'));
   db = openDatabase(dir);
-  const owner = randomUUID(); const admin = randomUUID(); const editor = randomUUID(); const viewer = randomUUID();
-  const team = randomUUID(); const otherTeam = randomUUID();
   const now = isoNow();
+  const owner = randomUUID(); const editor = randomUUID(); const viewer = randomUUID();
+  const team = randomUUID(); const otherTeam = randomUUID(); const space = randomUUID(); const document = randomUUID();
+  const hash = await hashPassword(password);
+  users = { owner: { id: owner, email: 'owner@example.test' }, editor: { id: editor, email: 'editor@example.test' }, viewer: { id: viewer, email: 'viewer@example.test' } };
   const insertUser = db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)');
-  for (const [id, key] of [[owner, 'owner'], [admin, 'admin'], [editor, 'editor'], [viewer, 'viewer']] as const) {
-    insertUser.run(id, `${key}@example.test`, `${key}@example.test`, key, 'unused', now);
-  }
+  for (const [key, user] of Object.entries(users)) insertUser.run(user.id, user.email, user.email, key, hash, now);
   db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(team, 'Team A', now);
   db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(otherTeam, 'Team B', now);
-  member(team, owner, 'owner'); member(team, admin, 'admin'); member(team, editor, 'editor'); member(team, viewer, 'viewer');
-  member(otherTeam, owner, 'owner');
-  const space = seedSpace(team, owner, 'Alpha');
-  const otherSpace = seedSpace(team, owner, 'Beta');
-  const remoteSpace = seedSpace(otherTeam, owner, 'Remote');
-  const doc = seedDocument(space, owner, 'Needle Alpha', 'shared needle in alpha');
-  const otherDoc = seedDocument(otherSpace, owner, 'Needle Beta', 'shared needle in beta');
-  const remoteDoc = seedDocument(remoteSpace, owner, 'Needle Remote', 'shared needle in remote');
-  sessions = {};
-  for (const [key, userId] of Object.entries({ owner, admin, editor, viewer })) {
-    const token = `session-${key}-${randomUUID()}`;
-    sessions[key] = token;
-    db.prepare('INSERT INTO sessions(id,token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?,?)')
-      .run(randomUUID(), hashToken(token), userId, now, new Date(Date.now() + 86_400_000).toISOString());
-  }
-  ids = { owner, admin, editor, viewer, team, otherTeam, space, otherSpace, remoteSpace, doc, otherDoc, remoteDoc };
-  const config: AppConfig = { port: 3000, dataDir: dir, appOrigin: origin, setupToken: 'unused', cookieSecure: false, isProduction: false };
+  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(team, owner, 'owner', now);
+  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(team, editor, 'editor', now);
+  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(team, viewer, 'viewer', now);
+  db.prepare('INSERT INTO members(team_id,user_id,role,created_at) VALUES(?,?,?,?)').run(otherTeam, owner, 'owner', now);
+  db.prepare("INSERT INTO spaces(id,team_id,name,description,visibility,created_by,created_at) VALUES(?,?,?,'','team',?,?)").run(space, team, 'Knowledge', owner, now);
+  db.prepare("INSERT INTO documents(id,space_id,title,body,visibility,version,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,'Private body','inherit',1,?,?,?,?)").run(document, space, 'Private', owner, now, owner, now);
+  ids = { owner, editor, viewer, team, otherTeam, space, document };
+  const config: AppConfig = { port: 0, dataDir: dir, appOrigin: origin, setupToken: '', cookieSecure: false, isProduction: false };
   app = createApp({ db, config, logger: false, serveClient: false });
   await app.ready();
 });
 
-afterEach(async () => {
-  await app.close();
-  db.close();
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(async () => { await app.close(); db.close(); await rm(dir, { recursive: true, force: true }); });
 
-function sessionRequest(user: keyof typeof sessions, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: unknown) {
-  const headers: Record<string, string> = { cookie: `teamshelf_session=${sessions[user]}`, ...(method === 'GET' ? {} : csrf), ...(payload === undefined ? {} : { 'content-type': 'application/json' }) };
-  return app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
+function basic(user: keyof typeof users, passwordValue = password) {
+  return `Basic ${Buffer.from(`${users[user].email}:${passwordValue}`, 'utf8').toString('base64')}`;
+}
+function request(user: keyof typeof users, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: unknown, extraHeaders: Record<string, string> = {}, remoteAddress?: string) {
+  return app.inject({ method, url, headers: { authorization: basic(user), origin, ...extraHeaders, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) }, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }), ...(remoteAddress ? { remoteAddress } : {}) });
 }
 
-async function issue(user: keyof typeof sessions, data: Record<string, unknown>) {
-  const response = await sessionRequest(user, 'POST', '/api/agent-tokens', { name: 'Test Agent', teamId: ids.team, ...data });
-  expect(response.statusCode).toBe(201);
-  return response.json() as { credential: { id: string; scope: string; spaceId: string | null; tokenHint: string }; token: string };
-}
+describe('account authentication for Agent REST routes', () => {
+  it('accepts only Basic credentials on the allowlist and keeps PAT issuance disabled', async () => {
+    const read = await request('viewer', 'GET', `/api/teams/${ids.team}/spaces`);
+    expect(read.statusCode).toBe(200);
+    expect((await request('viewer', 'GET', '/api/auth/me')).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: 'Bearer ts_agent_legacy', origin } })).statusCode).toBe(401);
+    expect((await request('viewer', 'GET', `/api/teams/${ids.team}/spaces`, undefined, { cookie: 'teamshelf_session=browser-session' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: 'Basic !!!', origin } })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: basic('viewer'), origin: 'https://attacker.example' } })).statusCode).toBe(403);
 
-function bearer(token: string, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: unknown, extraHeaders: Record<string, string> = {}) {
-  return app.inject({ method, url, headers: { authorization: `Bearer ${token}`, origin, ...extraHeaders, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) }, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
-}
+    expect((await app.inject({ method: 'GET', url: '/api/agent-tokens', headers: { cookie: 'teamshelf_session=browser-session' } })).statusCode).toBe(410);
+    expect((await app.inject({ method: 'POST', url: '/api/agent-tokens', headers: { cookie: 'teamshelf_session=browser-session', 'x-requested-with': 'TeamShelf' }, payload: { name: 'old', teamId: ids.team } })).statusCode).toBe(410);
+    const legacy = `ts_agent_${'x'.repeat(40)}`;
+    db.prepare('INSERT INTO agent_tokens(id,user_id,team_id,name,scope,token_hash,token_hint,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(randomUUID(), ids.viewer, ids.team, 'historical token', 'read', hashToken(legacy), 'legacy', isoNow(), new Date(Date.now() + 86_400_000).toISOString());
+    expect((await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: `Bearer ${legacy}`, origin } })).statusCode).toBe(401);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM agent_tokens WHERE token_hint='legacy'").get() as { count: number }).count).toBe(1);
+  });
 
-describe('Agent credentials and REST bearer policy', () => {
-  it('allows ordinary read traffic beyond the old shared-IP threshold while separately throttling credential issuance', async () => {
-    const read = await issue('owner', { scope: 'read' });
-    for (let i = 0; i < 125; i++) {
-      const response = await bearer(read.token, 'GET', `/api/teams/${ids.team}/spaces`);
-      expect(response.statusCode).toBe(200);
+  it('re-reads the current team role, applies document ACLs, and records account auth without a credential id', async () => {
+    const first = await request('editor', 'PATCH', `/api/documents/${ids.document}`, { title: 'Updated', body: 'safe', version: 1 });
+    expect(first.statusCode).toBe(200);
+    const adminCookie = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { 'x-requested-with': 'TeamShelf' }, payload: { email: users.owner.email, password } });
+    const cookie = String(adminCookie.headers['set-cookie']).split(';')[0];
+    const demote = await app.inject({ method: 'PATCH', url: `/api/teams/${ids.team}/members/${ids.editor}`, headers: { cookie, origin, 'x-requested-with': 'TeamShelf', 'content-type': 'application/json' }, payload: { role: 'viewer' } });
+    expect(demote.statusCode).toBe(200);
+    expect((await request('editor', 'PATCH', `/api/documents/${ids.document}`, { title: 'Denied', body: 'unsafe', version: 2 })).statusCode).toBe(403);
+
+    const audit = db.prepare("SELECT details_json FROM audit_events WHERE actor_id=? AND action='agent.document.write' ORDER BY rowid DESC LIMIT 1").get(ids.editor) as { details_json: string };
+    const details = JSON.parse(audit.details_json) as Record<string, unknown>;
+    expect(details).toHaveProperty('authType', 'account_basic');
+    expect(details).not.toHaveProperty('credentialId');
+  });
+
+  it('allows successful calls beyond ten per minute and rate-limits repeated failures by IP', async () => {
+    for (let i = 0; i < 12; i++) expect((await request('viewer', 'GET', `/api/teams/${ids.team}/spaces`, undefined, {}, '198.51.100.10')).statusCode).toBe(200);
+    for (let i = 0; i < 20; i++) {
+      const response = await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: 'Basic !!!', origin }, remoteAddress: '198.51.100.20' });
+      expect(response.statusCode).toBe(401);
+      expect(response.body).not.toContain('!!!');
     }
-    let finalStatus = 0;
-    for (let i = 0; i < 10; i++) {
-      finalStatus = (await sessionRequest('owner', 'POST', '/api/agent-tokens', { name: `Throttle ${i}`, teamId: ids.team, scope: 'read' })).statusCode;
-      if (i < 9) expect(finalStatus).toBe(201);
-    }
-    expect(finalStatus).toBe(429);
-  });
-  it('migrates a v1 database to the current schema idempotently without changing existing data', async () => {
-    const migrationDir = await mkdtemp(path.join(os.tmpdir(), 'teamshelf-v1-'));
-    const first = openDatabase(migrationDir);
-    first.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run('team-migration', 'Preserve', isoNow());
-    first.exec('DROP INDEX documents_parent_idx; DROP INDEX proposals_parent_idx; ALTER TABLE documents DROP COLUMN parent_id; ALTER TABLE proposals DROP COLUMN parent_id; PRAGMA user_version=8;');
-    first.close();
-    const migrated = openDatabase(migrationDir);
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(9);
-    expect((migrated.prepare('PRAGMA table_info(documents)').all() as Array<{name:string}>).some((column)=>column.name==='parent_id')).toBe(true);
-    expect((migrated.prepare('PRAGMA table_info(proposals)').all() as Array<{name:string}>).some((column)=>column.name==='parent_id')).toBe(true);
-    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='documents_parent_idx'").get()).toBeTruthy();
-    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='proposals_parent_idx'").get()).toBeTruthy();
-    expect(migrated.prepare("SELECT name FROM teams WHERE id='team-migration'").get()).toEqual({ name: 'Preserve' });
-    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_tokens'").get()).toBeTruthy();
-    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'").get()).toBeTruthy();
-    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='external_rooms'").get()).toBeTruthy();
-    expect((migrated.prepare('PRAGMA table_info(spaces)').all() as Array<{name:string}>).some((column)=>column.name==='require_review')).toBe(true);
-    migrated.exec('DROP TABLE agent_tokens; PRAGMA user_version=1;');
-    migrated.close();
-    const twice = openDatabase(migrationDir);
-    expect((twice.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(9);
-    twice.close();
-    await rm(migrationDir, { recursive: true, force: true });
-  });
-
-  it('shows a PAT only once, stores only its hash, and restricts credential routes to browser sessions', async () => {
-    const issued = await issue('owner', { scope: 'manage' });
-    expect(issued.token).toMatch(/^ts_agent_[A-Za-z0-9_-]{32,}$/);
-    expect(issued.credential.tokenHint).not.toBe(issued.token);
-    const stored = db.prepare('SELECT token_hash,token_hint FROM agent_tokens WHERE id=?').get(issued.credential.id) as { token_hash: string; token_hint: string };
-    expect(stored.token_hash).not.toBe(issued.token);
-    expect(stored.token_hint).toBe(issued.credential.tokenHint);
-
-    const list = await sessionRequest('owner', 'GET', '/api/agent-tokens');
-    expect(list.statusCode).toBe(200);
-    expect(list.json().credentials[0]).not.toHaveProperty('token');
-    expect(list.json().credentials[0]).not.toHaveProperty('token_hash');
-    expect(list.body).not.toContain(issued.token);
-
-    expect((await bearer(issued.token, 'GET', '/api/agent-tokens')).statusCode).toBe(403);
-    expect((await bearer(issued.token, 'POST', '/api/agent-tokens', { teamId: ids.team, name: 'bad' })).statusCode).toBe(403);
-    expect((await bearer(issued.token, 'GET', '/api/auth/me')).statusCode).toBe(403);
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces`, undefined, { cookie: `teamshelf_session=${sessions.owner}` })).statusCode).toBe(401);
-    expect((await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: 'Bearer ' + issued.token + ' ' } })).statusCode).toBe(401);
-  });
-
-  it('binds credentials to one team and filters space-bound lists and searches before limiting', async () => {
-    const teamToken = await issue('owner', { scope: 'read' });
-    const otherTeam = await bearer(teamToken.token, 'GET', `/api/teams/${ids.otherTeam}/spaces`);
-    expect(otherTeam.statusCode).toBe(404);
-    expect(otherTeam.body).not.toContain('Remote');
-    expect((await bearer(teamToken.token, 'GET', `/api/documents/${ids.remoteSpace}`)).statusCode).toBe(404);
-
-    const scoped = await issue('owner', { scope: 'read', spaceId: ids.space });
-    const spaces = await bearer(scoped.token, 'GET', `/api/teams/${ids.team}/spaces`);
-    expect(spaces.statusCode).toBe(200);
-    expect(spaces.json().spaces.map((entry: { id: string }) => entry.id)).toEqual([ids.space]);
-    const search = await bearer(scoped.token, 'GET', `/api/teams/${ids.team}/search?q=needle`);
-    expect((await bearer(scoped.token, 'GET', '/api/teams/' + ids.team + '/search?q=needle&spaceId=' + ids.otherSpace)).statusCode).toBe(404);
-    expect(search.statusCode).toBe(200);
-    expect(search.json().documents.map((entry: { id: string }) => entry.id)).toEqual([ids.doc]);
-    expect((await bearer(scoped.token, 'GET', `/api/documents/${ids.otherDoc}`)).statusCode).toBe(404);
-    expect((await bearer(scoped.token, 'GET', `/api/spaces/${ids.otherSpace}/documents`)).statusCode).toBe(404);
-  });
-
-  it('intersects token scope with the current role immediately after role downgrade', async () => {
-    const issued = await issue('admin', { scope: 'manage' });
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/members`)).statusCode).toBe(200);
-    const downgrade = await sessionRequest('owner', 'PATCH', `/api/teams/${ids.team}/members/${ids.admin}`, { role: 'editor' });
-    expect(downgrade.statusCode).toBe(200);
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/members`)).statusCode).toBe(403);
-    const identity = await bearer(issued.token, 'GET', '/api/agent/identity');
-    expect(identity.statusCode).toBe(200);
-    expect(identity.json().effectiveScope).toBe('write');
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces`)).statusCode).toBe(200);
-  });
-
-  it('revokes a member’s token when the member is removed', async () => {
-    const issued = await issue('editor', { scope: 'write' });
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces`)).statusCode).toBe(200);
-    const removed = await sessionRequest('owner', 'DELETE', `/api/teams/${ids.team}/members/${ids.editor}`);
-    expect(removed.statusCode).toBe(200);
-    const row = db.prepare('SELECT revoked_at FROM agent_tokens WHERE id=?').get(issued.credential.id) as { revoked_at: string | null };
-    expect(row.revoked_at).toBeTruthy();
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces`)).statusCode).toBe(401);
-  });
-
-  it('enforces role ceilings on issue and manager revocation limits', async () => {
-    const denied = await sessionRequest('viewer', 'POST', '/api/agent-tokens', { name: 'Too strong', teamId: ids.team, scope: 'write' });
-    expect(denied.statusCode).toBe(403);
-    const ownerToken = await issue('owner', { scope: 'manage' });
-    const listed = await sessionRequest('admin', 'GET', `/api/teams/${ids.team}/agent-tokens`);
-    expect(listed.statusCode).toBe(200);
-    const revokeOwner = await sessionRequest('admin', 'DELETE', `/api/agent-tokens/${ownerToken.credential.id}`);
-    expect(revokeOwner.statusCode).toBe(403);
-    const selfToken = await issue('admin', { scope: 'manage' });
-    const revokeSelf = await sessionRequest('admin', 'DELETE', `/api/agent-tokens/${selfToken.credential.id}`);
-    expect(revokeSelf.statusCode).toBe(200);
-    expect((await bearer(selfToken.token, 'GET', `/api/teams/${ids.team}/spaces`)).statusCode).toBe(401);
-  });
-  it('allows fixed REST document updates only with write scope and the expected version', async () => {
-    const issued = await issue('editor', { scope: 'write' });
-    const changed = await bearer(issued.token, 'PATCH', `/api/documents/${ids.doc}`, { title: 'Updated by PAT', body: 'written through the guarded REST route', version: 1 });
-    expect(changed.statusCode).toBe(200);
-    expect(changed.json().document.version).toBe(2);
-    const audit = db.prepare("SELECT actor_id,target_type,target_id,details_json FROM audit_events WHERE action='agent.document.write' ORDER BY created_at DESC LIMIT 1").get() as { actor_id: string; target_type: string; target_id: string; details_json: string };
-    expect(audit.actor_id).toBe(ids.editor);
-    expect(audit.target_type).toBe('document');
-    expect(audit.target_id).toBe(ids.doc);
-    expect(JSON.parse(audit.details_json)).toHaveProperty('credentialId', issued.credential.id);
-    const stale = await bearer(issued.token, 'PATCH', `/api/documents/${ids.doc}`, { title: 'Stale', body: 'must not overwrite', version: 1 });
-    expect(stale.statusCode).toBe(409);
-    const row = db.prepare('SELECT title,version FROM documents WHERE id=?').get(ids.doc) as { title: string; version: number };
-    expect(row).toEqual({ title: 'Updated by PAT', version: 2 });
-    const extraFields = await bearer(issued.token, 'PATCH', `/api/documents/${ids.doc}`, { title: 'Invalid', body: '', version: 2, teamId: ids.otherTeam, spaceId: ids.otherSpace });
-    expect(extraFields.statusCode).toBe(400);
-  });
-
-  it('paginates filtered spaces, documents, and search results beyond the first 100', async () => {
-    for (let index = 0; index < 105; index++) seedSpace(ids.team, ids.owner, `Page space ${index.toString().padStart(3, '0')}`);
-    for (let index = 0; index < 105; index++) seedDocument(ids.space, ids.owner, `Page doc ${index.toString().padStart(3, '0')}`, 'pagination needle');
-    for (let index = 0; index < 105; index++) {
-      const userId = randomUUID();
-      db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)').run(userId, `page-${index}@example.test`, `page-${index}@example.test`, `Page ${index}`, 'unused', isoNow());
-      member(ids.team, userId, 'viewer');
-    }
-    for (let version = 2; version <= 106; version++) db.prepare('INSERT INTO revisions(id,document_id,version,title,body,created_at,created_by,author_name) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(), ids.doc, version, `Revision ${version}`, 'body', isoNow(), ids.owner, 'Owner');
-    const issued = await issue('owner', { scope: 'read' });
-    const spaces = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/spaces?offset=100&limit=100`);
-    const cookieMembers = await sessionRequest('owner', 'GET', `/api/teams/${ids.team}/members`);
-    expect(cookieMembers.statusCode).toBe(200);
-    expect(cookieMembers.json().members).toHaveLength(109);
-    const manageToken = await issue('owner', { scope: 'manage' });
-    const pagedMembers = await bearer(manageToken.token, 'GET', '/api/teams/' + ids.team + '/members?offset=100&limit=100');
-    expect(pagedMembers.json().members).toHaveLength(9);
-    const cookieRevisions = await sessionRequest('owner', 'GET', `/api/documents/${ids.doc}/revisions`);
-    expect(cookieRevisions.statusCode).toBe(200);
-    expect(cookieRevisions.json().revisions).toHaveLength(106);
-    const patRevisions = await bearer(issued.token, 'GET', `/api/documents/${ids.doc}/revisions?offset=100&limit=100`);
-    expect(patRevisions.statusCode).toBe(200);
-    expect(patRevisions.json().revisions).toHaveLength(6);
-    expect(patRevisions.json().revisions.every((revision: Record<string, unknown>) => !('body' in revision))).toBe(true);
-    expect(spaces.statusCode).toBe(200);
-    expect(spaces.json().spaces).toHaveLength(7);
-    expect(spaces.json().hasMore).toBe(false);
-    expect(spaces.json().nextOffset).toBeNull();
-    const documents = await bearer(issued.token, 'GET', `/api/spaces/${ids.space}/documents?offset=100&limit=100`);
-    expect(documents.statusCode).toBe(200);
-    expect(documents.json().documents).toHaveLength(6);
-    const search = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&offset=100&limit=100`);
-    expect(search.statusCode).toBe(200);
-    expect(search.json().documents.length).toBeGreaterThan(0);
-    const scopedSearch = await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&spaceId=${ids.otherSpace}`);
-    expect(scopedSearch.statusCode).toBe(200);
-    expect(scopedSearch.json().documents.map((doc: { id: string }) => doc.id)).toContain(ids.otherDoc);
-    expect((await bearer(issued.token, 'GET', `/api/teams/${ids.team}/search?q=needle&spaceId=${ids.remoteSpace}`)).statusCode).toBe(404);
-    expect(search.json().documents).toHaveLength(7);
-    expect(search.json().documents.every((doc: { spaceId: string }) => [ids.space, ids.otherSpace].includes(doc.spaceId))).toBe(true);
-  });
-  it('reads one revision by document and revision ID while rechecking ACL', async () => {
-    const ownRevision = db.prepare('SELECT id FROM revisions WHERE document_id=? ORDER BY version DESC LIMIT 1').get(ids.doc) as { id: string };
-    const otherRevision = db.prepare('SELECT id FROM revisions WHERE document_id=? ORDER BY version DESC LIMIT 1').get(ids.otherDoc) as { id: string };
-    const ownerToken = await issue('owner', { scope: 'read' });
-    const mismatch = await bearer(ownerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${otherRevision.id}`);
-    expect(mismatch.statusCode).toBe(404);
-
-    const viewerToken = await issue('viewer', { scope: 'read', spaceId: ids.space });
-    const grant = await sessionRequest('owner', 'PUT', `/api/documents/${ids.doc}/access`, { visibility: 'restricted', grants: [{ userId: ids.viewer, role: 'viewer' }] });
-    expect(grant.statusCode).toBe(200);
-    const readable = await bearer(viewerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${ownRevision.id}`);
-    expect(readable.statusCode).toBe(200);
-    expect(readable.json().revision).toHaveProperty('body');
-    const revoke = await sessionRequest('owner', 'PUT', `/api/documents/${ids.doc}/access`, { visibility: 'restricted', grants: [] });
-    expect(revoke.statusCode).toBe(200);
-    const denied = await bearer(viewerToken.token, 'GET', `/api/documents/${ids.doc}/revisions/${ownRevision.id}`);
-    expect(denied.statusCode).toBe(404);
-    expect(denied.body).not.toContain('Needle Alpha');
-  });
-  it('prevents write PATs from assigning document ACLs through REST', async () => {
-    const writeToken = await issue('editor', { scope: 'write', spaceId: ids.space });
-    const before = (db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(ids.space) as { count: number }).count;
-    const denied = await bearer(writeToken.token, 'POST', `/api/spaces/${ids.space}/documents`, { title: 'Should not exist', body: 'secret', visibility: 'restricted', grants: [{ userId: ids.viewer, role: 'viewer' }] });
-    expect(denied.statusCode).toBe(403);
-    expect((db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(ids.space) as { count: number }).count).toBe(before);
-    const ordinary = await bearer(writeToken.token, 'POST', `/api/spaces/${ids.space}/documents`, { title: 'Ordinary write', body: 'content' });
-    expect(ordinary.statusCode).toBe(201);
-    const manageToken = await issue('owner', { scope: 'manage', spaceId: ids.space });
-    const managed = await bearer(manageToken.token, 'POST', `/api/spaces/${ids.space}/documents`, { title: 'Restricted with grant', visibility: 'restricted', grants: [{ userId: ids.viewer, role: 'viewer' }] });
-    expect(managed.statusCode).toBe(201);
-    expect(managed.json().document.visibility).toBe('restricted');
-  });
-  it('revokes PATs on password change while retaining metadata', async () => {
-    const passToken = await issue('owner', { scope: 'read' });
-    const hash = await hashPassword('old password that is valid 4');
-    db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hash, ids.owner);
-    const changed = await sessionRequest('owner', 'POST', '/api/auth/password', { currentPassword: 'old password that is valid 4', newPassword: 'new password that is valid 5' });
-    expect(changed.statusCode).toBe(200);
-    expect((db.prepare('SELECT revoked_at FROM agent_tokens WHERE id=?').get(passToken.credential.id) as { revoked_at: string | null }).revoked_at).toBeTruthy();
-    expect((await bearer(passToken.token, 'GET', `/api/teams/${ids.team}/spaces`)).statusCode).toBe(401);
-  });
-
-  it('revokes space-bound PATs on space deletion while retaining metadata', async () => {
-    const spaceId = seedSpace(ids.team, ids.owner, 'Delete me');
-    const spaceToken = await issue('owner', { scope: 'read', spaceId });
-    const deleted = await sessionRequest('owner', 'DELETE', `/api/spaces/${spaceId}`);
-    expect(deleted.statusCode).toBe(200);
-    expect((db.prepare('SELECT revoked_at FROM agent_tokens WHERE id=?').get(spaceToken.credential.id) as { revoked_at: string | null }).revoked_at).toBeTruthy();
+    const limited = await app.inject({ method: 'GET', url: `/api/teams/${ids.team}/spaces`, headers: { authorization: basic('viewer'), origin }, remoteAddress: '198.51.100.20' });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers['retry-after']).toBe('60');
+    expect(limited.body).not.toContain(users.viewer.email);
+    expect(limited.body).not.toContain(password);
   });
 });

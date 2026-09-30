@@ -1,6 +1,6 @@
 # 协作、审阅与外部资料室
 
-TeamShelf 将多人工作拆成正式文档与可变更草稿。浏览器通过会话 Cookie、Agent 通过个人 Bearer PAT 进行服务端身份认证；两者均受成员角色、空间/文档 ACL 与版本检查约束；协作草稿不直接改写正式 Markdown。
+TeamShelf 将多人工作拆成正式文档与可变更草稿。浏览器与 MCP Agent 使用成员账号通过服务端身份认证；两者均受成员角色、空间/文档 ACL 与版本检查约束；协作草稿不直接改写正式 Markdown。
 
 ![协作、审阅与资料室数据流](images/teamshelf-collaboration-architecture.svg)
 

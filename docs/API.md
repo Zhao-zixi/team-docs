@@ -45,9 +45,9 @@ interface Document extends DocumentSummary {
 | POST `/auth/password` | `{currentPassword,newPassword}` | `{ok:true}` 并撤销所有旧 sessions |
 
 密码长度 12–128。Setup token 必须与环境配置匹配，不向客户端返回；错误 token 不应消耗初始化机会。
-## Agent 凭据
+## MCP 身份认证
 
-凭据管理只接受浏览器 session cookie，并继续要求 `X-Requested-With: TeamShelf`；REST 认证禁止 Bearer。创建时 `POST /agent-tokens` 接收 `{name,teamId,scope?,spaceId?,expiresInDays?}`，scope 默认 `read`、有效期默认 30 天且最大 90 天。成功只返回一次明文 `{credential,token}`；列表及后续查询仅返回 `AgentCredentialSummary` 元数据，不返回 token 或 hash。`GET /agent-tokens` 列出当前用户所有团队的凭据；owner/admin 可通过 `GET /teams/:teamId/agent-tokens` 查看本团队元数据。`DELETE /agent-tokens/:id` 撤销，权限按当前团队角色检查。scope 上限为 viewer=`read`、editor=`write`、admin/owner=`manage`；spaceId 必须属于指定团队且签发人当前可读。凭据字段见 `src/shared/types.ts`。
+MCP 使用 HTTP Basic 登录身份：用户名为知屿登录邮箱，密码为网页登录密码。TeamShelf 每次请求重新验证账号、当前团队成员角色和空间/文档 ACL；不签发独立 MCP token、PAT 或 session。角色、成员关系和资源 ACL 变化从下一次请求生效。密码更改后，STDIO 使用者需更新本地 `TEAMSHELF_MCP_PASSWORD` 并重启桥接进程。协议入口及客户端变量见[Agent 与 MCP 指南](MCP.md)。
 
 ## 团队、成员与邀请
 
@@ -91,14 +91,14 @@ interface Document extends DocumentSummary {
 | DELETE `/documents/:id` | — | `{ok:true}` |
 | GET `/documents/:id/access` | — | `{visibility,grants}` |
 | PUT `/documents/:id/access` | `{visibility,grants}` | `{document}` |
-| GET `/documents/:id/revisions` | `{offset?,limit?,metadataOnly?}` | `{revisions,hasMore?,nextOffset?}`；PAT 默认仅元数据，不取正文 |
+| GET `/documents/:id/revisions` | `{offset?,limit?,metadataOnly?}` | `{revisions,hasMore?,nextOffset?}` |
 | GET `/documents/:id/revisions/:revisionId` | — | `{revision: Revision}`；当前文档 ACL 与 revision/document 关联同时验证 |
 | POST `/documents/:id/revisions/:revisionId/restore` | `{version}` | `{document}` |
 | GET `/documents/:id/export` | — | `text/markdown` 下载 |
 | GET `/teams/:teamId/search?q=...` | — | `{documents}`，仅可见摘要 |
 | GET `/teams/:teamId/audit` | — | `{events}`，仅 owner/admin |
 
-`Revision` 为 `{id,version,title,body,createdAt,authorName}`。cookie 客户端历史列表未请求分页或metadataOnly时保持原行为返回正文；PAT 历史列表SQL不读取正文，需读取某一版本时调用固定单版本路径。每次内容修改与恢复均生成新版本历史快照；恢复和删除仅 owner/admin。Document ACL 仅 owner/admin 可设置；创建 restricted 文档也只允许 owner/admin。Document `inherit` 使用空间可访问能力；`restricted` 要求用户既能进入空间又有 document grant。空间权限与文档权限逐层取最小值，document grant 不得绕过 restricted 空间。`canEdit` 与 `canManage` 必须按当前请求的 ACL 计算；文档管理（ACL、删除、恢复）仅 owner/admin。所有正文、列表、搜索、历史及导出在服务端按当前 ACL 过滤，无权资源返回 404。
+`Revision` 为 `{id,version,title,body,createdAt,authorName}`。历史列表未请求分页或metadataOnly时返回正文；每次内容修改与恢复均生成新版本历史快照；恢复和删除仅 owner/admin。Document ACL 仅 owner/admin 可设置；创建 restricted 文档也只允许 owner/admin。Document `inherit` 使用空间可访问能力；`restricted` 要求用户既能进入空间又有 document grant。空间权限与文档权限逐层取最小值，document grant 不得绕过 restricted 空间。`canEdit` 与 `canManage` 必须按当前请求的 ACL 计算；文档管理（ACL、删除、恢复）仅 owner/admin。所有正文、列表、搜索、历史及导出在服务端按当前 ACL 过滤，无权资源返回 404。
 
 ## 角色与分层权限摘要
 
@@ -114,10 +114,8 @@ interface Document extends DocumentSummary {
 
 状态码至少包括：400 输入/跨团队 grant 无效，401 未认证，403 缺失 CSRF/非法 mutation，404 无权或不存在资源，409 版本冲突/重复邀请/空间非空/状态冲突，429 限速。错误消息不得包含无权资源的标题、正文、作者或存在性信息。所有失败 mutation 必须无副作用。
 
-## Agent 与 MCP 分页
+## 分页
 
-MCP 通过固定 `/mcp` endpoint 和 `Authorization: Bearer <PAT>` 连接。MCP 不接受 session cookie；Bearer 与 cookie 混合请求拒绝。PAT 的 team、space、scope 与调用人的当前团队角色、ACL 每次重新验证。管理凭据的 REST 路由只接受浏览器 session + CSRF。所有未显式标记的 REST 路由默认拒绝 Bearer。
+以下列表 REST 路由支持 `offset`（默认 `0`，非负整数）与 `limit`（默认 `100`，范围 1–100），并在授权过滤后返回具体列表与 `{hasMore,nextOffset}`。适用路由：`GET /teams/:teamId/spaces`、`GET /spaces/:spaceId/documents`、`GET /teams/:teamId/search`、`GET /documents/:id/revisions`、`GET /teams/:teamId/members`、`GET /teams/:teamId/invitations`、`GET /teams/:teamId/audit`。有下一页时 `nextOffset` 为下一页起点；无下一页为 `null`。未传分页时保持现有 REST 行为；带分页参数的请求按参数分页。
 
-以下列表 REST 路由支持 `offset`（默认 `0`，非负整数）与 `limit`（默认 `100`，范围 1–100），并在授权过滤后返回具体列表与 `{hasMore,nextOffset}`。适用路由：`GET /teams/:teamId/spaces`、`GET /spaces/:spaceId/documents`、`GET /teams/:teamId/search`、`GET /documents/:id/revisions`、`GET /teams/:teamId/members`、`GET /teams/:teamId/invitations`、`GET /teams/:teamId/audit`。有下一页时 `nextOffset` 为下一页起点；无下一页为 `null`。Bearer 默认页大小100，调用方可继续翻页。Cookie 客户端未传分页时保持既有行为：空间/文档/搜索/审计仍为原本最多100条，成员/邀请/历史仍返回原全量列表。带分页参数的 cookie 请求也按参数分页。
-
-搜索接受可选 `spaceId`。服务端先验证该空间属于路径中的团队并且当前用户可读；单空间 PAT 只能指定其绑定空间。空间过滤先于文档 ACL 过滤、全文匹配与分页，跨团队或不满足绑定的空间返回 404。空间 PAT 未指定 `spaceId` 时自动仅搜索绑定空间。
+搜索接受可选 `spaceId`。服务端先验证该空间属于路径中的团队并且当前用户可读。空间过滤先于文档 ACL 过滤、全文匹配与分页；跨团队或无权空间返回 404。
