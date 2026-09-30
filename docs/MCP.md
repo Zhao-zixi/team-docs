@@ -1,5 +1,12 @@
 # Agent 与 MCP 设计
 
+## 操作指南
+
+- [PC 用户：用 Codex 连接 TeamShelf](MCP/PC-USER-GUIDE.md)
+- [管理员：配置与管理 Agent / MCP 凭据](MCP/ADMIN-GUIDE.md)
+
+本页保留协议、工具权限和实现边界；面向使用者的操作步骤请从以上指南开始。
+
 ## 身份与凭据
 
 MCP 使用 stateless HTTP endpoint `/mcp` 和官方 TypeScript MCP server v2.1.0 协议实现。客户端通过 `Authorization: Bearer ts_agent_…` 认证。MCP 请求不得使用浏览器 session cookie，也拒绝 Bearer 与 cookie 混合认证。若请求带 Origin，必须精确匹配 `APP_ORIGIN`；Host 仅允许配置源 hostname 或 loopback。MCP 不需要浏览器 CSRF header。

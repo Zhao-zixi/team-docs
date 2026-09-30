@@ -17,6 +17,10 @@
 | NAS 固定 digest 更新 | 已运行 TeamShelf，按已验证版本更新 | 阅读 [`nas-up.sh` 部署说明](docs/DEPLOYMENT.md#nas-固定-digest-安装与更新) |
 | GitHub 自动更新 | 管理员已配置 NAS runner，想通过 GitHub 校验并部署 | 阅读 [`deploy-release.ps1` 与 CI/CD 说明](docs/CICD.md) |
 
+## Agent / MCP
+
+在个人电脑上用 Codex 连接 TeamShelf，按[PC 用户操作指南](docs/MCP/PC-USER-GUIDE.md)逐项填写；管理员配置凭据和管理权限见[管理员指南](docs/MCP/ADMIN-GUIDE.md)。协议与工具参考见[MCP 文档](docs/MCP.md)。
+
 ## NAS / Docker 源码部署
 
 下方命令是 Linux/NAS 示例，部署者需要 Docker Engine、Docker Compose v2 和 Bash。Windows 部署者可用 Docker Desktop Linux 容器及 [Git for Windows Bash](https://git-scm.com/install/windows)，并按[Windows Docker Compose 步骤](docs/DEPLOYMENT.md#源码-docker-compose)使用 Windows 路径。团队成员无需安装这些工具，只需浏览器。
