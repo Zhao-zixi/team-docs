@@ -481,6 +481,46 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await grandchildProposalDetail.getByRole("button", { name: "批准提案" }).click();
   await page.reload();
   await expect(page.getByRole("heading", { name: childTitle })).toBeVisible();
+  let releaseDirectoryLoad!: () => void;
+  let directoryLoadObserved = false;
+  let directoryRequestMode: "delay" | "fail" | "continue" = "delay";
+  const directoryLoadGate = new Promise<void>(resolve => { releaseDirectoryLoad = resolve; });
+  const directoryRouteMatcher = (url: URL) => url.pathname === `/api/spaces/${spaceId}/documents`;
+  await page.route(directoryRouteMatcher, async route => {
+    if (route.request().method() !== "GET" || Number(new URL(route.request().url()).searchParams.get("offset") ?? 0) !== 0) return route.continue();
+    if (directoryRequestMode === "delay") {
+      directoryRequestMode = "continue";
+      const response = await route.fetch();
+      directoryLoadObserved = true;
+      await directoryLoadGate;
+      return route.fulfill({ response });
+    }
+    if (directoryRequestMode === "fail") {
+      directoryRequestMode = "continue";
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "TEMPORARY_UNAVAILABLE", message: "temporary test failure" } }) });
+    }
+    return route.continue();
+  });
+  await page.reload();
+  const childDirectory = page.locator(".document-child-directory");
+  try {
+    await expect.poll(() => directoryLoadObserved).toBe(true);
+    await expect(childDirectory.getByText("正在加载可见文档目录…")).toBeVisible();
+    await expect(childDirectory.getByText(childTitle, { exact: true })).toHaveCount(0);
+    await expect(childDirectory.getByText(grandchildTitle, { exact: true })).toHaveCount(0);
+  } finally {
+    releaseDirectoryLoad();
+  }
+  await expect(childDirectory.locator(".document-child-directory-link").filter({ hasText: grandchildTitle })).toBeVisible();
+  directoryRequestMode = "fail";
+  await page.reload();
+  await expect(childDirectory.getByRole("alert")).toContainText("temporary test failure");
+  await expect(childDirectory.getByText("暂无可见子文档。", { exact: true })).toHaveCount(0);
+  await expect(childDirectory.getByText(childTitle, { exact: true })).toHaveCount(0);
+  await expect(childDirectory.getByText(grandchildTitle, { exact: true })).toHaveCount(0);
+  await childDirectory.getByRole("button", { name: "重试加载" }).click();
+  await expect(childDirectory.locator(".document-child-directory-link").filter({ hasText: grandchildTitle })).toBeVisible();
+  await page.unroute(directoryRouteMatcher);
   const currentParentRow = page.locator(".document-link").filter({ hasText: "分页填充-001" });
   const currentChildRow = page.locator(".document-link").filter({ hasText: childTitle });
   const currentGrandchildRow = page.locator(".document-link").filter({ hasText: grandchildTitle });
@@ -488,6 +528,44 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect(currentChildRow).toHaveAttribute("data-document-depth", "1");
   await expect(currentGrandchildRow).toHaveAttribute("data-document-depth", "2");
   await expect(page.locator(".document-link").filter({ hasText: "分页填充-002" })).toBeVisible();
+
+  await currentParentRow.click();
+  await expect(page.getByRole("heading", { name: "分页填充-001" })).toBeVisible();
+  const parentDirectory = page.locator(".document-child-directory");
+  const childDirectoryLink = parentDirectory.locator(".document-child-directory-link").filter({ hasText: childTitle });
+  const grandchildDirectoryLink = parentDirectory.locator(".document-child-directory-link").filter({ hasText: grandchildTitle });
+  await expect(childDirectoryLink).toBeVisible();
+  await expect(grandchildDirectoryLink).toBeVisible();
+  const directoryTestToast = page.getByRole("button", { name: "关闭提示" });
+  if (await directoryTestToast.isVisible()) await directoryTestToast.click();
+  await page.screenshot({ path: "test-results/screenshots/document-child-directory-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  const mobileDrawerClose = page.locator(".mobile-close");
+  if (await mobileDrawerClose.isVisible()) await mobileDrawerClose.click();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "分页填充-001" })).toBeVisible();
+  await expect(parentDirectory.locator(".document-child-directory-link").filter({ hasText: grandchildTitle })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  await page.screenshot({ path: "test-results/screenshots/document-child-directory-mobile-375.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const parentDirectoryToggle = parentDirectory.getByRole("button", { name: "收起子文档目录" });
+  await parentDirectoryToggle.click();
+  await expect(parentDirectory.getByRole("button", { name: "展开子文档目录" })).toHaveAttribute("aria-expanded", "false");
+  await expect(childDirectoryLink).toBeHidden();
+  await parentDirectory.getByRole("button", { name: "展开子文档目录" }).click();
+  const inlineChildToggle = parentDirectory.getByRole("button", { name: `折叠“${childTitle}”子文档` });
+  await inlineChildToggle.click();
+  await expect(grandchildDirectoryLink).toBeHidden();
+  await expect(currentGrandchildRow).toBeVisible();
+  await parentDirectory.getByRole("button", { name: `展开“${childTitle}”子文档` }).click();
+  await expect(grandchildDirectoryLink).toBeVisible();
+  await page.getByRole("button", { name: "折叠“分页填充-001”子文档" }).click();
+  await expect(currentChildRow).toBeHidden();
+  await expect(childDirectoryLink).toBeVisible();
+  await page.getByRole("button", { name: "展开“分页填充-001”子文档" }).click();
+  await childDirectoryLink.click();
+  await expect(page.getByRole("heading", { name: childTitle })).toBeVisible();
+  await expect(page.locator(".document-child-directory").locator(".document-child-directory-link").filter({ hasText: grandchildTitle })).toBeVisible();
 
   const parentTreeToggle = page.getByRole("button", { name: "折叠“分页填充-001”子文档" });
   const childTreeToggle = page.getByRole("button", { name: `折叠“${childTitle}”子文档` });
@@ -833,8 +911,27 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   page.once("dialog", dialog => dialog.accept());
   await page.goto(`/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`);
   const publicUrl = `/?team=${teamId}&space=${spaceId}&doc=${publicDocId}`;
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  await page.locator(".toolbar-actions").getByRole("button", { name: "在“团队公开说明”下新建子文档" }).click();
+  const restrictedChildDialog = page.getByRole("dialog");
+  await expect(restrictedChildDialog.getByText("父文档：团队公开说明")).toBeVisible();
+  const publicDocIdBeforeRestrictedChild = new URL(page.url()).searchParams.get("doc");
+  await restrictedChildDialog.getByLabel("文档标题").fill("受限目录子项");
+  await restrictedChildDialog.getByLabel("Markdown 正文").fill("仅测试可见目录的ACL过滤。");
+  await restrictedChildDialog.getByRole("button", { name: "创建文档" }).click();
+  const restrictedChildId = await waitForNewDocumentUrl(page, publicDocIdBeforeRestrictedChild);
+  const restrictedChildAccess = await page.evaluate(async id => {
+    const response = await fetch(`/api/documents/${id}/access`, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "TeamShelf" }, body: JSON.stringify({ visibility: "restricted", grants: [] }) });
+    return { status: response.status, body: await response.json() };
+  }, restrictedChildId);
+  expect(restrictedChildAccess.status).toBe(200);
+  await page.goto(publicUrl);
+  await expect(page.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
   await viewerPage.goto(publicUrl);
   await expect(viewerPage.getByRole("heading", { name: "团队公开说明" })).toBeVisible();
+  const viewerChildDirectory = viewerPage.locator(".document-child-directory");
+  await expect(viewerChildDirectory.getByText("暂无可见子文档。", { exact: true })).toBeVisible();
+  await expect(viewerChildDirectory.getByText("受限目录子项", { exact: true })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "编辑文档" })).toHaveCount(0);
   await expect(viewerPage.getByRole("button", { name: "继续编辑草稿" })).toHaveCount(0);
   await expect(viewerPage.getByLabel("Markdown 正文")).toHaveCount(0);
