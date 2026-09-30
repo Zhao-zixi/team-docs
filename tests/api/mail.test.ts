@@ -167,7 +167,7 @@ describe('personal SMTP settings and email invitations', () => {
     db.prepare('INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
       .run(randomUUID(), adminId, teamId, null, 'test agent', 'manage', hashToken(agentToken), agentToken.slice(-6), now, expiresInDays(2));
     const bearer = await app.inject({ method: 'POST', url: '/api/teams/' + teamId + '/invitations/email', headers: { ...baseHeaders, authorization: 'Bearer ' + agentToken }, payload: { email: 'bearer@example.test', role: 'viewer' } });
-    expect(bearer.statusCode).toBe(403);
+    expect(bearer.statusCode).toBe(401);
 
     const adminInvite = await app.inject({ method: 'POST', url: '/api/teams/' + teamId + '/invitations', headers: { ...baseHeaders, cookie: ownerCookie }, payload: { email: 'new-admin@example.test', role: 'admin' } });
     expect(adminInvite.statusCode).toBe(201);

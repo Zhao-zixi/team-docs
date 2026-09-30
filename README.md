@@ -19,7 +19,7 @@
 
 ## Agent / MCP
 
-在个人电脑上用 Codex 连接 TeamShelf，按[PC 用户操作指南](docs/MCP/PC-USER-GUIDE.md)逐项填写；管理员配置凭据和管理权限见[管理员指南](docs/MCP/ADMIN-GUIDE.md)。协议与工具参考见[MCP 文档](docs/MCP.md)。
+在个人电脑上用 Codex 连接 TeamShelf，按[PC 用户操作指南](docs/MCP/PC-USER-GUIDE.md)逐项填写。MCP 使用成员自己的网页登录邮箱和密码，并按当前团队角色、知识库权限及文档 ACL 实时授权；管理员配置成员与资源权限见[管理员指南](docs/MCP/ADMIN-GUIDE.md)。协议与工具参考见[MCP 文档](docs/MCP.md)。
 
 ## NAS / Docker 源码部署
 
@@ -69,7 +69,7 @@ pwsh -NoProfile -File .\scripts\start-local.ps1
 
 ![TeamShelf 文档访问权限设置界面](docs/images/teamshelf-access-demo.png)
 
-owner/admin 可以查看本团队全部知识库和文档，包括受限内容。管理员角色管理另有边界：只有 owner 可以任命或撤销 admin。普通成员按团队角色和资源授权访问；受限知识库需要知识库授权，受限文档还需要文档授权，文档授权不能绕过所属知识库权限。Agent 凭据也受当前成员权限与凭据范围共同限制，详见[架构与权限](docs/ARCHITECTURE.md)和[Agent / MCP 指南](docs/MCP.md)。管理员个人邮箱配置、邮件邀请和重发方式见[邮箱与邀请指南](docs/EMAIL.md)。
+owner/admin 可以查看本团队全部知识库和文档，包括受限内容。管理员角色管理另有边界：只有 owner 可以任命或撤销 admin。普通成员按团队角色和资源授权访问；受限知识库需要知识库授权，受限文档还需要文档授权，文档授权不能绕过所属知识库权限。MCP 使用成员现有账号，并在每次调用时检查当前角色和资源 ACL，详见[架构与权限](docs/ARCHITECTURE.md)和[Agent / MCP 指南](docs/MCP.md)。管理员个人邮箱配置、邮件邀请和重发方式见[邮箱与邀请指南](docs/EMAIL.md)。
 
 文档列表按父子关系显示文档；“新建文档”创建根文档，打开可编辑文档后可用“新建子文档”。子文档默认继承空间权限，实际读写权限还要同时满足每一级父文档权限，因此不能扩大祖先文档的访问范围。包含子文档的父文档须先处理子项才能删除。若知识库要求审阅，新建子文档会先提交提案，其他管理员批准后才加入正式文档树。
 

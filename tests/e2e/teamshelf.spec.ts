@@ -21,6 +21,17 @@ async function waitForNewDocumentUrl(page: Page, previousId: string | null): Pro
   return id!;
 }
 
+function basicMcpTransport(baseUrl: string, email: string, password: string) {
+  const authorization = `Basic ${Buffer.from(`${email}:${password}`, "utf8").toString("base64")}`;
+  return new StreamableHTTPClientTransport(new URL("/mcp", baseUrl), {
+    fetch: (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set("Authorization", authorization);
+      return fetch(input, { ...init, headers });
+    },
+  });
+}
+
 test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-link refresh", async ({ page, browser }) => {
   activeMailSink = await startLocalTlsSmtpSink();
   const sink = activeMailSink;
@@ -86,6 +97,8 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   expect(emailInvitePayload).not.toHaveProperty("token");
   const viewerInviteRow = page.locator(".member-row").filter({ hasText: viewerEmail });
   await expect(viewerInviteRow).toContainText("邮件已发送");
+  await membersDialog.locator(".modal-body").evaluate(element => { element.scrollTop = 0; });
+  await membersDialog.screenshot({ path: "docs/MCP/images/admin-members-roles.png", animations: "disabled" });
   await expect.poll(() => sink.received.filter(mail => mail.to.includes(viewerEmail)).length).toBe(1);
   const oldInviteUrl = inviteUrlFromMail(sink.received.find(mail => mail.to.includes(viewerEmail))!);
   const oldInviteToken = new URL(oldInviteUrl).searchParams.get("invite")!;
@@ -213,6 +226,25 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const teamId = new URL(page.url()).searchParams.get("team");
   const spaceId = new URL(page.url()).searchParams.get("space");
   expect(publicDocId).toBeTruthy(); expect(teamId).toBeTruthy(); expect(spaceId).toBeTruthy();
+
+  const legacyTokenRequests: string[] = [];
+  viewerPage.on("request", request => { if (request.url().includes("/api/agent-tokens")) legacyTokenRequests.push(request.url()); });
+  await viewerPage.getByRole("button", { name: "MCP 连接" }).click();
+  const viewerMcpDialog = viewerPage.getByRole("dialog", { name: "MCP 连接" });
+  await expect(viewerMcpDialog).toContainText(viewerEmail);
+  await expect(viewerMcpDialog).toContainText("TEAMSHELF_MCP_URL");
+  await expect(viewerMcpDialog).toContainText("TEAMSHELF_MCP_EMAIL");
+  await expect(viewerMcpDialog).toContainText("TEAMSHELF_MCP_PASSWORD");
+  await expect(viewerMcpDialog).not.toContainText(viewerPassword);
+  await viewerMcpDialog.screenshot({ path: "docs/MCP/images/member-mcp-connection.png", animations: "disabled" });
+  await viewerMcpDialog.getByRole("button", { name: "关闭", exact: true }).click();
+  expect(legacyTokenRequests).toEqual([]);
+  const viewerMcp = new Client({ name: "teamshelf-e2e-viewer", version: "1.0.0" });
+  await viewerMcp.connect(basicMcpTransport(page.url(), viewerEmail, viewerPassword));
+  const viewerTeams = await viewerMcp.callTool({ name: "list_teams", arguments: {} });
+  expect(JSON.stringify(viewerTeams)).toContain(teamId);
+  expect(JSON.stringify(viewerTeams)).toContain(viewerEmail);
+  expect(JSON.stringify(viewerTeams)).toContain("viewer");
 
   await page.getByRole("tab", { name: "富文本" }).click();
   const editor = page.locator(".ProseMirror");
@@ -847,54 +879,6 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await collab.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(reviewerPage.getByRole("dialog", { name: "多人协作草稿" })).toHaveCount(0);
   await reviewerContext.close();
-  await page.getByRole("button", { name: "Agent / MCP" }).click();
-  const agentDialog = page.getByRole("dialog", { name: "Agent / MCP 凭据" });
-  await expect(agentDialog.getByLabel("Agent 权限范围")).toBeEnabled();
-  await agentDialog.getByLabel("凭据名称").fill("E2E UI read only");
-  await agentDialog.getByLabel("Agent 权限范围").selectOption("read");
-  await agentDialog.getByLabel("限制知识库").selectOption(spaceId!);
-  const issueWait = page.waitForResponse(response => response.url().endsWith("/api/agent-tokens") && response.request().method() === "POST");
-  await agentDialog.getByRole("button", { name: "创建并显示一次性密钥" }).click();
-  const issueResponse = await issueWait;
-  expect(issueResponse.status()).toBe(201);
-  const tokenInput = agentDialog.getByRole("textbox", { name: "一次性 Agent Token" });
-  await expect(tokenInput).toBeVisible();
-  const agentToken = await tokenInput.inputValue();
-  expect(agentToken).toMatch(/^ts_agent_[A-Za-z0-9_-]{32,}$/);
-  expect(await page.evaluate(() => [location.href, ...Object.values(sessionStorage), ...Object.values(localStorage)])).not.toContain(agentToken);
-  const mcpTransport = new StreamableHTTPClientTransport(new URL("/mcp", page.url()), { authProvider: { token: async () => agentToken } });
-  const mcpClient = new Client({ name: "teamshelf-e2e-agent", version: "1.0.0" });
-  await mcpClient.connect(mcpTransport);
-  const agentTools = await mcpClient.listTools();
-  expect(agentTools.tools.map(tool => tool.name)).toContain("get_document");
-  expect(agentTools.tools.map(tool => tool.name)).not.toContain("create_document");
-  const agentRead = await mcpClient.callTool({ name: "get_document", arguments: { documentId: publicDocId } });
-  expect(JSON.stringify(agentRead)).toContain("安全编辑");
-  const revoke = agentDialog.locator(".team-agent-list").getByRole("button", { name: "撤销E2E UI read only" });
-  page.once("dialog", dialog => dialog.accept());
-  await revoke.click();
-  await expect(revoke).toHaveCount(0);
-  let revokedStatus = "";
-  try { await mcpClient.callTool({ name: "whoami", arguments: {} }); }
-  catch (cause) { revokedStatus = cause instanceof Error ? cause.name : "error"; }
-  expect(revokedStatus).toBe("UnauthorizedError");
-  await mcpClient.close();
-  await expect(tokenInput).toHaveCount(0);
-  await expect(agentDialog.getByText(/ts_agent_[A-Za-z0-9_-]{32,}/)).toHaveCount(0);
-  await agentDialog.getByRole("button", { name: "关闭", exact: true }).click();
-  await page.getByRole("button", { name: "Agent / MCP" }).click();
-  const reopenedAgentDialog = page.getByRole("dialog", { name: "Agent / MCP 凭据" });
-  await expect(reopenedAgentDialog.locator(".team-agent-list")).toContainText("已撤销");
-  await reopenedAgentDialog.locator('.modal-body').evaluate(element => { element.scrollTop = element.scrollHeight; });
-  await page.waitForTimeout(150);
-  await page.screenshot({ path: "test-results/agent-list-desktop.png", fullPage: true });
-  await page.setViewportSize({ width: 375, height: 812 });
-  await reopenedAgentDialog.locator('.modal-body').evaluate(element => { element.scrollTop = element.scrollHeight; });
-  await page.waitForTimeout(150);
-  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
-  await page.screenshot({ path: "test-results/agent-list-mobile-375.png", fullPage: true });
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await reopenedAgentDialog.getByRole("button", { name: "关闭", exact: true }).click();
   let releaseSpaceAccess!: () => void;
   let announceSpaceAccessRead!: () => void;
   const spaceAccessGate = new Promise<void>(resolve => { releaseSpaceAccess = resolve; });
@@ -945,6 +929,7 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   releaseAccessRead();
   await expect(accessRange).toBeEnabled();
   await accessRange.selectOption("restricted");
+  await accessDialog.screenshot({ path: "docs/MCP/images/admin-document-permissions.png", animations: "disabled" });
   await expect(accessRange).toHaveValue("restricted");
   const aclPutWait = page.waitForResponse(response => response.url().includes(`/api/documents/${restrictedDocId}/access`) && response.request().method() === "PUT");
   await accessDialog.getByRole("button", { name: "解释与预览" }).first().click();
@@ -960,6 +945,28 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const aclPutBody = await aclPutResponse.json();
   expect(aclPutBody.document.visibility).toBe("restricted");
   await expect(page.getByText("访问权限已更新。" )).toBeVisible();
+
+  const viewerRestrictedRead = await viewerMcp.callTool({ name: "get_document", arguments: { documentId: restrictedDocId } });
+  expect(viewerRestrictedRead.isError).toBe(true);
+  expect(JSON.stringify(viewerRestrictedRead)).not.toContain("内部计划，仅读者授权后可见。");
+  const viewerMcpUserId = await viewerPage.evaluate(async () => (await (await fetch("/api/auth/me", { credentials: "same-origin" })).json()).user.id as string);
+  const grantViewerStatus = await page.evaluate(async ({ documentId, userId }) => (await fetch(`/api/documents/${documentId}/access`, {
+    method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "TeamShelf" },
+    body: JSON.stringify({ visibility: "restricted", grants: [{ userId, role: "viewer" }] }),
+  })).status, { documentId: restrictedDocId, userId: viewerMcpUserId });
+  expect(grantViewerStatus).toBe(200);
+  const viewerAllowedAfterGrant = await viewerMcp.callTool({ name: "get_document", arguments: { documentId: restrictedDocId } });
+  expect(viewerAllowedAfterGrant.isError).not.toBe(true);
+  expect(JSON.stringify(viewerAllowedAfterGrant)).toContain("内部计划，仅读者授权后可见。");
+  const revokeViewerStatus = await page.evaluate(async documentId => (await fetch(`/api/documents/${documentId}/access`, {
+    method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "TeamShelf" },
+    body: JSON.stringify({ visibility: "restricted", grants: [] }),
+  })).status, restrictedDocId);
+  expect(revokeViewerStatus).toBe(200);
+  const viewerDeniedAfterRevoke = await viewerMcp.callTool({ name: "get_document", arguments: { documentId: restrictedDocId } });
+  expect(viewerDeniedAfterRevoke.isError).toBe(true);
+  expect(JSON.stringify(viewerDeniedAfterRevoke)).not.toContain("内部计划，仅读者授权后可见。");
+  await viewerMcp.close();
 
   await page.getByRole("button", { name: "新建文档" }).click();
   createDialog = page.getByRole("dialog");
@@ -1072,7 +1079,13 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   await expect.poll(() => viewerPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await viewerPage.screenshot({ path: "test-results/teamshelf-mobile-375.png", fullPage: true });
 
-  const aclEvidence = await page.evaluate(async id => { const response = await fetch(`/api/documents/${id}/access`, { credentials: "same-origin" }); return { status: response.status, body: await response.json() }; }, restrictedDocId);
+  let aclEvidence = await page.evaluate(async id => { const response = await fetch(`/api/documents/${id}/access`, { credentials: "same-origin" }); return { status: response.status, retryAfter: response.headers.get("retry-after"), body: await response.json() }; }, restrictedDocId);
+  if (aclEvidence.status === 429 && aclEvidence.body.error?.code === "RATE_LIMITED") {
+    const retryAfterSeconds = aclEvidence.retryAfter && /^\d+$/.test(aclEvidence.retryAfter) ? Number(aclEvidence.retryAfter) : NaN;
+    expect(Number.isInteger(retryAfterSeconds) && retryAfterSeconds > 0 && retryAfterSeconds <= 60, `Unexpected Retry-After value: ${aclEvidence.retryAfter}`).toBe(true);
+    await page.waitForTimeout((retryAfterSeconds + 1) * 1000);
+    aclEvidence = await page.evaluate(async id => { const response = await fetch(`/api/documents/${id}/access`, { credentials: "same-origin" }); return { status: response.status, retryAfter: response.headers.get("retry-after"), body: await response.json() }; }, restrictedDocId);
+  }
   let viewerAuthEvidence = await viewerPage.evaluate(async () => {
     const response = await fetch("/api/auth/me", { credentials: "same-origin" });
     const body = await response.json();

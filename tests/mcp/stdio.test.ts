@@ -21,21 +21,23 @@ afterEach(async () => {
 });
 
 describe("stdio bridge configuration", () => {
-  it("accepts a fixed HTTP(S) /mcp endpoint with an env token", () => {
-    const config = parseBridgeConfig({ TEAMSHELF_MCP_URL: "https://docs.example.test/team/mcp", TEAMSHELF_MCP_TOKEN: "opaque-secret" });
+  it("accepts a fixed HTTP(S) /mcp endpoint with account credentials", () => {
+    const config = parseBridgeConfig({ TEAMSHELF_MCP_URL: "https://docs.example.test/team/mcp", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" });
     expect(config.endpoint.href).toBe("https://docs.example.test/team/mcp");
-    expect(config.token).toBe("opaque-secret");
+    expect(config.email).toBe("user@example.test");
+    expect(config.password).toBe("opaque-secret");
   });
 
   it.each([
-    ["missing endpoint", { TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["missing token", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp" }],
-    ["non HTTP scheme", { TEAMSHELF_MCP_URL: "file:///mcp", TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["userinfo", { TEAMSHELF_MCP_URL: "https://user:pass@docs.example.test/mcp", TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["query", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp?token=opaque-secret", TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["fragment", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp#opaque-secret", TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["wrong endpoint", { TEAMSHELF_MCP_URL: "https://docs.example.test/admin", TEAMSHELF_MCP_TOKEN: "opaque-secret" }],
-    ["multiline token", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp", TEAMSHELF_MCP_TOKEN: "opaque-secret\nInjected: true" }],
+    ["missing endpoint", { TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["missing email", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["missing password", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp", TEAMSHELF_MCP_EMAIL: "user@example.test" }],
+    ["non HTTP scheme", { TEAMSHELF_MCP_URL: "file:///mcp", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["userinfo", { TEAMSHELF_MCP_URL: "https://user:pass@docs.example.test/mcp", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["query", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp?token=opaque-secret", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["fragment", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp#opaque-secret", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["wrong endpoint", { TEAMSHELF_MCP_URL: "https://docs.example.test/admin", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "opaque-secret" }],
+    ["password above length limit", { TEAMSHELF_MCP_URL: "https://docs.example.test/mcp", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: "x".repeat(129) }],
   ])("rejects %s without echoing credentials", (_label, env) => {
     let error = "";
     try { parseBridgeConfig(env as Record<string, string | undefined>); }
@@ -44,13 +46,20 @@ describe("stdio bridge configuration", () => {
     expect(error).not.toBe("");
   });
 
-  it("rejects HTTP redirects instead of forwarding bearer credentials", async () => {
+  it("preserves control characters in passwords because Basic encodes them before HTTP transport", () => {
+    const password = "line one\nline two\0tail";
+    const config = parseBridgeConfig({ TEAMSHELF_MCP_URL: "https://docs.example.test/mcp", TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: password });
+    expect(config.password).toBe(password);
+  });
+
+  it("rejects HTTP redirects instead of forwarding Basic credentials", async () => {
     let redirectedRequestCount = 0;
     const destination = createServer((_request, response) => { redirectedRequestCount++; response.end("unexpected"); });
     const destinationUrl = await listen(destination);
     const redirector = createServer((_request, response) => { response.writeHead(302, { Location: `${destinationUrl}/capture` }); response.end(); });
     const redirectUrl = `${await listen(redirector)}/mcp`;
-    await expect(safeFetch(redirectUrl, { headers: { Authorization: "Bearer never-forward-this" } })).rejects.toThrow();
+    const basicSecret = `Basic ${Buffer.from("user@example.test:opaque-secret").toString("base64")}`;
+    await expect(safeFetch(redirectUrl, { headers: { Authorization: basicSecret } })).rejects.toThrow();
     expect(redirectedRequestCount).toBe(0);
   });
 });
@@ -67,7 +76,8 @@ async function startFixture(options: { redirectTo?: string; isRevoked?: () => bo
   const server = createServer(async (incoming, outgoing) => {
     const url = new URL(incoming.url ?? "/", "http://127.0.0.1");
     if (options.redirectTo) { outgoing.writeHead(302, { Location: options.redirectTo }); outgoing.end(); return; }
-    if (incoming.headers.authorization !== `Bearer ${bridgeSecret}` || options.isRevoked?.()) { outgoing.writeHead(401, { "Content-Type": "application/json" }); outgoing.end(JSON.stringify({ error: "invalid_token" })); return; }
+    const expected = `Basic ${Buffer.from(`user@example.test:${bridgeSecret}`).toString("base64")}`;
+    if (incoming.headers.authorization !== expected || options.isRevoked?.()) { outgoing.writeHead(401, { "Content-Type": "application/json" }); outgoing.end(JSON.stringify({ error: "invalid_credentials" })); return; }
     try {
       const chunks: Buffer[] = [];
       for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
@@ -92,7 +102,7 @@ async function startStdioClient(endpoint: string, onStderr: (chunk: string) => v
     command: process.execPath,
     args: ["--import", "tsx/esm", bridgePath],
     cwd: process.cwd(),
-    env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_TOKEN: bridgeSecret },
+    env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: bridgeSecret },
     stderr: "pipe",
   });
   const client = new Client({ name: "stdio-bridge-test", version: "1.0.0" });
@@ -124,15 +134,17 @@ describe("official MCP stdio bridge integration", () => {
     await client.close();
     await exited;
     expect(logs).not.toContain(bridgeSecret);
+    expect(logs).not.toContain(Buffer.from(`user@example.test:${bridgeSecret}`).toString("base64"));
+    expect(logs.toLowerCase()).not.toContain("authorization");
   });
 
-  it("never forwards a bearer token across an HTTP redirect", async () => {
+  it("never forwards Basic credentials across an HTTP redirect", async () => {
     let redirectedAuthorization: string | undefined;
     const target = createServer((request, response) => { redirectedAuthorization = request.headers.authorization; response.end("unexpected"); });
     const destination = `${await listen(target)}/capture`;
     const { endpoint } = await startFixture({ redirectTo: destination });
     let logs = "";
-    const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", "tsx/esm", bridgePath], cwd: process.cwd(), env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_TOKEN: bridgeSecret }, stderr: "pipe" });
+    const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", "tsx/esm", bridgePath], cwd: process.cwd(), env: { ...process.env, TEAMSHELF_MCP_URL: endpoint, TEAMSHELF_MCP_EMAIL: "user@example.test", TEAMSHELF_MCP_PASSWORD: bridgeSecret }, stderr: "pipe" });
     const client = new Client({ name: "stdio-redirect-test", version: "1.0.0" });
     const connected = client.connect(transport);
     const child = (transport as unknown as { _process?: { stderr?: NodeJS.ReadableStream } })._process;
@@ -140,6 +152,8 @@ describe("official MCP stdio bridge integration", () => {
     await expect(connected).rejects.toThrow();
     expect(redirectedAuthorization).toBeUndefined();
     expect(logs).not.toContain(bridgeSecret);
+    expect(logs).not.toContain(Buffer.from(`user@example.test:${bridgeSecret}`).toString("base64"));
+    expect(logs.toLowerCase()).not.toContain("authorization");
     await transport.close().catch(() => undefined);
   });
 });

@@ -175,7 +175,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     requireTeamRole(db, user.id, teamId!);
     const page = parsePage(request.query);
     const rows = db.prepare('SELECT id,team_id,name,description,visibility FROM spaces WHERE team_id=? ORDER BY name,id').all(teamId) as unknown as SpaceRow[];
-    const spaces = rows.filter((row) => !request.agentPrincipal?.spaceId || row.id === request.agentPrincipal.spaceId).flatMap((row) => {
+    const spaces = rows.flatMap((row) => {
       const access = getSpaceAccess(db, user.id, row.id);
       return access?.canRead ? [toSpace(row, access)] : [];
     });
@@ -286,7 +286,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
       if (!parent || parent.space_id !== spaceId) throw notFound();
       if (!getDocumentAccess(db, user.id, parentId)?.canEdit) throw forbidden();
     }
-    if (request.agentPrincipal && (input.visibility === 'restricted' || input.grants.length > 0) && (request.agentPrincipal.scope !== 'manage' || !access.canManage)) throw forbidden('Agent 凭据需要当前 manage 权限才能设置文档访问权限。');
+    if (request.agentPrincipal && (input.visibility === 'restricted' || input.grants.length > 0) && !access.canManage) throw forbidden('此操作需要当前团队管理权限。');
     requireBodyBytes(input.body);
     if (input.visibility === 'restricted' && !access.canManage) throw forbidden();
     if (input.visibility === 'inherit' && input.grants.length) throw badRequest('inherit 文档不能包含单独授权。');
@@ -449,8 +449,7 @@ export function registerContentRoutes(app: FastifyInstance, { db }: AppContext):
     if (!parsedQuery.success) throw badRequest('搜索词长度必须为 1 到 100 个字符，且不能包含额外字段。');
     const needle = parsedQuery.data.q.toLocaleLowerCase();
     const page = { offset: parsedQuery.data.offset, limit: parsedQuery.data.limit };
-    const selectedSpaceId = parsedQuery.data.spaceId ?? request.agentPrincipal?.spaceId ?? undefined;
-    if (parsedQuery.data.spaceId && request.agentPrincipal?.spaceId && parsedQuery.data.spaceId !== request.agentPrincipal.spaceId) throw notFound();
+    const selectedSpaceId = parsedQuery.data.spaceId ?? undefined;
     if (selectedSpaceId) {
       const selectedSpace = db.prepare('SELECT team_id FROM spaces WHERE id=?').get(selectedSpaceId) as { team_id: string } | undefined;
       if (!selectedSpace || selectedSpace.team_id !== teamId) throw notFound();

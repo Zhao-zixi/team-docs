@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { createApp } from '../../src/server/app.js';
 import { openDatabase, type Db } from '../../src/server/db.js';
-import { hashToken, isoNow } from '../../src/server/security.js';
+import { hashPassword, hashToken, isoNow } from '../../src/server/security.js';
 
 interface Fixture {
   owner: string; editor: string; viewer: string; spaceViewer: string; docOnly: string; otherOwner: string;
@@ -55,7 +55,7 @@ beforeEach(async () => {
   const now = isoNow();
   const userInsert = db.prepare('INSERT INTO users(id,email,normalized_email,name,password_hash,created_at) VALUES(?,?,?,?,?,?)');
   for (const [key, id] of Object.entries(ids).filter(([key]) => !['team', 'otherTeam'].includes(key))) {
-    userInsert.run(id, `${key}@example.test`, `${key}@example.test`, key, 'not-used', now);
+    userInsert.run(id, `${key}@example.test`, `${key}@example.test`, key, key === 'owner' ? await hashPassword('content-owner-test-password') : 'not-used', now);
   }
   db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(ids.team, 'Content Team', now);
   db.prepare('INSERT INTO teams(id,name,created_at) VALUES(?,?,?)').run(ids.otherTeam, 'Other Team', now);
@@ -111,13 +111,8 @@ function request(user: keyof Fixture['tokens'], method: 'GET' | 'POST' | 'PATCH'
   return app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }) });
 }
 
-function bearerOwner() {
-  const token = `ts_agent_${randomUUID().replaceAll('-', '')}`;
-  const now = isoNow();
-  db.prepare(`INSERT INTO agent_tokens(id,user_id,team_id,space_id,name,scope,token_hash,token_hint,created_at,expires_at)
-    VALUES(?,?,?,NULL,'review test','manage',?, 'test…token',?,?)`)
-    .run(randomUUID(), f.owner, f.team, hashToken(token), now, new Date(Date.now() + 86_400_000).toISOString());
-  return token;
+function basicOwner() {
+  return `Basic ${Buffer.from('owner@example.test:content-owner-test-password').toString('base64')}`;
 }
 function docAccess(userId: string, documentId: string, role: string) {
   addGrant('document_grants', 'document_id', documentId, userId, role);
@@ -340,7 +335,7 @@ describe('content and ACL API', () => {
     expect(explanation.json().reasons.some((reason: { layer: string; code: string }) => reason.layer === 'space' && reason.code === 'space_grant')).toBe(true);
     expect((await request('spaceViewer', 'GET', `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`)).statusCode).toBe(403);
     expect((await request('owner', 'GET', `/api/spaces/${f.otherSpace}/access/explain?userId=${f.otherOwner}`)).statusCode).toBe(404);
-    expect((await app.inject({ method: 'GET', url: `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`, headers: { authorization: `Bearer ${bearerOwner()}`, origin: 'http://localhost:5173' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: `/api/spaces/${f.restrictedSpace}/access/explain?userId=${f.spaceViewer}`, headers: { authorization: `Bearer ${randomUUID()}`, origin: 'http://localhost:5173' } })).statusCode).toBe(401);
 
     const spaceBefore = db.prepare('SELECT visibility FROM spaces WHERE id=?').get(f.teamSpace) as { visibility: string };
     const spacePreview = await request('owner', 'POST', `/api/spaces/${f.teamSpace}/access/preview`, {
@@ -396,11 +391,11 @@ describe('content and ACL API', () => {
     expect(editorMine.statusCode).toBe(200);
     expect(editorMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.editor)).toBe(true);
     expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
-    const ownerToken=bearerOwner();
-    const agentMine=await app.inject({method:'GET',url:`/api/teams/${f.team}/proposals`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}});
+    const ownerAuth=basicOwner();
+    const agentMine=await app.inject({method:'GET',url:`/api/teams/${f.team}/proposals?mine=true&status=approved`,headers:{authorization:ownerAuth,origin:'http://localhost:5173'}});
     expect(agentMine.statusCode).toBe(200);
     expect(agentMine.json().proposals.every((item:{authorId:string})=>item.authorId===f.owner)).toBe(true);
-    expect((await app.inject({method:'GET',url:`/api/proposals/${createId}`,headers:{authorization:`Bearer ${ownerToken}`,origin:'http://localhost:5173'}})).statusCode).toBe(404);
+    expect((await app.inject({method:'GET',url:`/api/proposals/${createId}`,headers:{authorization:ownerAuth,origin:'http://localhost:5173'}})).statusCode).toBe(200);
     expect((await request('viewer','GET',`/api/proposals/${createId}`)).statusCode).toBe(404);
   });
   it('rechecks review policy, author permissions and CAS during decision; supports restore and withdraw', async () => {
@@ -410,9 +405,8 @@ describe('content and ACL API', () => {
     const revision=db.prepare('SELECT id FROM revisions WHERE document_id=? AND version=1').get(f.inherited) as {id:string};
     const restore=await request('owner','POST',`/api/documents/${f.inherited}/proposals`,{kind:'restore',baseVersion:1,revisionId:revision.id});
     expect(restore.statusCode).toBe(201);
-    const token=bearerOwner();
-    const agentDecision=await app.inject({method:'POST',url:`/api/proposals/${restore.json().proposal.id}/decision`,headers:{authorization:`Bearer ${token}`,origin:'http://localhost:5173','content-type':'application/json'},payload:JSON.stringify({decision:'approve'})});
-    expect(agentDecision.statusCode).toBe(403);
+    const agentDecision=await app.inject({method:'POST',url:`/api/proposals/${restore.json().proposal.id}/decision`,headers:{authorization:`Bearer ${randomUUID()}`,origin:'http://localhost:5173','content-type':'application/json'},payload:JSON.stringify({decision:'approve'})});
+    expect(agentDecision.statusCode).toBe(401);
     expect((await request('editor','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
     expect((await request('owner','POST',`/api/proposals/${restore.json().proposal.id}/decision`,{decision:'approve'})).statusCode).toBe(403);
     db.prepare("UPDATE members SET role='admin' WHERE team_id=? AND user_id=?").run(f.team,f.editor);
@@ -461,8 +455,8 @@ describe('content and ACL API', () => {
     const viewerRow = allMembers.find((member) => member.userId === f.viewer);
     expect(viewerRow).toMatchObject({spacesReadable:1,spacesEditable:0,documentsReadable:2,documentsEditable:0});
     expect((await request('editor', 'GET', `/api/teams/${f.team}/access/health`)).statusCode).toBe(403);
-    const bearer = await app.inject({method:'GET',url:`/api/teams/${f.team}/access/health`,headers:{authorization:`Bearer ${bearerOwner()}`,origin:'http://localhost:5173'}});
-    expect(bearer.statusCode).toBe(403);
+    const bearer = await app.inject({method:'GET',url:`/api/teams/${f.team}/access/health`,headers:{authorization:`Bearer ${randomUUID()}`,origin:'http://localhost:5173'}});
+    expect(bearer.statusCode).toBe(401);
     expect((await request('owner', 'GET', `/api/teams/${f.otherTeam}/access/health`)).statusCode).toBe(404);
   });
   it('blocks all direct document mutations in review-required spaces without altering published state', async () => {
@@ -483,8 +477,7 @@ describe('content and ACL API', () => {
     expect((await request('owner', 'GET', `/api/documents/${f.inherited}`)).json().document).toMatchObject({ version: 1, body: '# Visible needle\n**Markdown** stays intact.' });
     expect(db.prepare('SELECT COUNT(*) AS count FROM documents WHERE space_id=?').get(f.teamSpace)).toEqual({ count: 2 });
 
-    const token = bearerOwner();
-    const mcpRest = await app.inject({ method: 'PATCH', url: `/api/documents/${f.inherited}`, headers: { authorization: `Bearer ${token}`, origin: 'http://localhost:5173', 'content-type': 'application/json' }, payload: JSON.stringify({ title: 'Agent blocked', body: 'blocked', version: 1 }) });
+    const mcpRest = await app.inject({ method: 'PATCH', url: `/api/documents/${f.inherited}`, headers: { authorization: basicOwner(), origin: 'http://localhost:5173', 'content-type': 'application/json' }, payload: JSON.stringify({ title: 'Agent blocked', body: 'blocked', version: 1 }) });
     expect(mcpRest.statusCode).toBe(409);
     expect(mcpRest.json().error.code).toBe('REVIEW_REQUIRED');
   });

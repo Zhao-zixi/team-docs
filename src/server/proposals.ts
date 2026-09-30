@@ -58,7 +58,7 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   const access=getSpaceAccess(db,authorId,spaceId);if(!space||!access?.canRead)throw notFound();if(!access.canEdit)throw forbidden();
   const parentId=input.parentId??null;if(parentId){const parent=db.prepare('SELECT space_id FROM documents WHERE id=?').get(parentId) as {space_id:string}|undefined;if(!parent||parent.space_id!==spaceId)throw notFound();if(!getDocumentAccess(db,authorId,parentId)?.canEdit)throw forbidden();}
   if(input.visibility==='restricted'&&!input.grants.length){} else if(input.visibility==='inherit'&&input.grants.length)throw badRequest('inherit 文档不能包含单独授权。');
-  assertGrantMembers(db,space.team_id,input.grants);if(principal&&input.visibility==='restricted'&&principal.scope!=='manage')throw forbidden();
+  assertGrantMembers(db,space.team_id,input.grants);if(principal&&input.visibility==='restricted'&&!access.canManage)throw forbidden();
   const user=db.prepare('SELECT name FROM users WHERE id=?').get(authorId) as {name:string};const id=randomUUID(),now=isoNow();
   transaction(db,()=>{db.prepare(`INSERT INTO proposals(id,team_id,space_id,parent_id,kind,author_id,title,body,visibility,grants_json,status,created_at) VALUES(?,?,?,?,'create',?,?,?,?,?,'pending',?)`).run(id,space.team_id,spaceId,parentId,authorId,input.title.trim(),input.body,input.visibility,JSON.stringify(input.grants),now);audit(db,space.team_id,authorId,'submit',id,{kind:'create',parentId});});
   return reply.code(201).send({proposal:toProposal(getProposal(db,id)!)});
@@ -68,7 +68,6 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   const doc=db.prepare('SELECT d.id,d.space_id,d.version,d.title,d.body,s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?').get(documentId) as {id:string;space_id:string;version:number;title:string;body:string;team_id:string}|undefined;
   const access=getDocumentAccess(db,authorId,documentId);if(!doc||!access?.canRead)throw notFound();if(input.baseVersion!==doc.version)throw conflict('文档版本已变化，请刷新后重试。');
   const actionManage=input.kind==='restore'||input.kind==='delete';if(actionManage&&!access.canManage)throw forbidden();if(!actionManage&&!access.canEdit)throw forbidden();
-  if(principal&&actionManage&&principal.scope!=='manage')throw forbidden();
   let title=doc.title,body=doc.body,revisionId:string|null=null;
   if(input.kind==='update'){title=input.title.trim();body=input.body;}
   if(input.kind==='restore'){const revision=db.prepare('SELECT title,body FROM revisions WHERE id=? AND document_id=?').get(input.revisionId,documentId) as {title:string;body:string}|undefined;if(!revision)throw notFound();title=revision.title;body=revision.body;revisionId=input.revisionId;}
@@ -79,7 +78,7 @@ export function registerProposalRoutes(app:FastifyInstance,{db}:AppContext):void
   const {teamId}=request.params as z.infer<typeof TeamParams>;const parsed=ListQuery.safeParse(request.query);if(!parsed.success)throw badRequest('查询参数无效。');const {status,offset,limit,mine}=parsed.data;
   const principal=request.agentPrincipal;
   if(principal){
-   const rows=db.prepare(`SELECT p.*,u.name AS author_name FROM proposals p JOIN users u ON u.id=p.author_id WHERE p.team_id=? AND p.author_id=? AND (? IS NULL OR p.status=?) AND (? IS NULL OR p.space_id=?) ORDER BY p.created_at DESC,p.id LIMIT ? OFFSET ?`).all(teamId,principal.userId,status??null,status??null,principal.spaceId,principal.spaceId,limit+1,offset) as ProposalRow[];
+   const rows=db.prepare(`SELECT p.*,u.name AS author_name FROM proposals p JOIN users u ON u.id=p.author_id WHERE p.team_id=? AND p.author_id=? AND (? IS NULL OR p.status=?) ORDER BY p.created_at DESC,p.id LIMIT ? OFFSET ?`).all(teamId,principal.userId,status??null,status??null,limit+1,offset) as ProposalRow[];
    const visible=rows.slice(0,limit).map(toSummary);return {proposals:visible,hasMore:rows.length>limit,nextOffset:rows.length>limit?offset+limit:null};
   }
   const actor=sessionActor(db,request);const role=db.prepare('SELECT role FROM members WHERE team_id=? AND user_id=?').get(teamId,actor) as {role:TeamRole}|undefined;if(!role)throw notFound();if(!isManager(role.role)&&!mine)throw forbidden();

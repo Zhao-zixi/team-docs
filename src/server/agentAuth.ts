@@ -1,115 +1,106 @@
 import type { FastifyRequest } from 'fastify';
-import type { AgentScope, TeamRole } from '../shared/types.js';
+import type { TeamRole } from '../shared/types.js';
 import type { Db } from './db.js';
-import { forbidden, notFound, unauthorized } from './errors.js';
-import { hashToken, isoNow } from './security.js';
+import { forbidden, HttpError, notFound, unauthorized } from './errors.js';
+import { verifyPassword } from './security.js';
 
-export interface AgentPrincipal {
-  userId: string;
-  credentialId: string;
-  teamId: string;
-  spaceId: string | null;
-  scope: AgentScope;
-  teamRole: TeamRole;
-}
-
+export interface AgentPrincipal { userId: string; }
 export type AgentOperation =
   | 'identity' | 'team.read' | 'team.manage' | 'member.read' | 'member.manage'
   | 'invite.read' | 'invite.manage' | 'space.read' | 'space.manage' | 'proposal.read' | 'proposal.write'
   | 'document.read' | 'document.write' | 'document.manage' | 'comment.read' | 'comment.write' | 'audit.read';
-
 export interface AgentRoutePolicy {
-  scope: AgentScope;
-  operation: AgentOperation;
-  teamParam?: 'teamId';
-  spaceParam?: 'spaceId';
-  documentParam?: 'id';
-  proposalParam?: 'id';
-  commentParam?: 'threadId';
-  allowSpaceBound?: boolean;
+  scope: 'read' | 'write' | 'manage'; operation: AgentOperation;
+  teamParam?: 'teamId'; spaceParam?: 'spaceId'; documentParam?: 'id';
+  proposalParam?: 'id'; commentParam?: 'threadId'; allowSpaceBound?: boolean;
 }
 
 declare module 'fastify' {
-  interface FastifyRequest {
-    agentPrincipal?: AgentPrincipal;
+  interface FastifyRequest { agentPrincipal?: AgentPrincipal; }
+  interface FastifyContextConfig { agentAccess?: AgentRoutePolicy; }
+}
+
+type Credentials = { email: string; password: string };
+type Attempt = { count: number; expiresAt: number; touchedAt: number };
+const failures = new Map<string, Attempt>();
+const failureWindowMs = 60_000;
+const maxFailures = 20;
+const maxFailureKeys = 4096;
+
+export function parseBasicAuthorization(value: string | undefined): Credentials {
+  if (!value || value.length > 1024 || !/^Basic [A-Za-z0-9+/]+={0,2}$/.test(value)) throw unauthorized();
+  const encoded = value.slice(6);
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) throw unauthorized();
+  let decoded: string;
+  try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw unauthorized(); }
+  const separator = decoded.indexOf(':');
+  if (separator < 1) throw unauthorized();
+  const email = decoded.slice(0, separator).trim().toLowerCase();
+  const password = decoded.slice(separator + 1);
+  if (!email || email.length > 254 || !password || Buffer.byteLength(password, 'utf8') > 512) throw unauthorized();
+  return { email, password };
+}
+
+function failureKey(ip: string): string { return ip.slice(0, 80) || 'unknown-ip'; }
+function pruneFailures(now: number): void {
+  for (const [key, attempt] of failures) if (attempt.expiresAt <= now) failures.delete(key);
+  while (failures.size >= maxFailureKeys) {
+    let oldestKey: string | undefined; let oldest = Infinity;
+    for (const [key, attempt] of failures) if (attempt.touchedAt < oldest) { oldest = attempt.touchedAt; oldestKey = key; }
+    if (!oldestKey) break;
+    failures.delete(oldestKey);
   }
-  interface FastifyContextConfig {
-    agentAccess?: AgentRoutePolicy;
+}
+function recordFailure(ip: string): void {
+  const now = Date.now(); pruneFailures(now);
+  const key = failureKey(ip); const current = failures.get(key);
+  if (!current || current.expiresAt <= now) failures.set(key, { count: 1, expiresAt: now + failureWindowMs, touchedAt: now });
+  else { current.count++; current.touchedAt = now; }
+}
+
+export async function authenticateBasicAccount(db: Db, authorization: string | undefined, ip: string): Promise<AgentPrincipal> {
+  const now = Date.now(); pruneFailures(now);
+  const key = failureKey(ip);
+  const attempt = failures.get(key);
+  if (attempt !== undefined && attempt.count >= maxFailures) throw new HttpError(429, 'RATE_LIMITED', '登录尝试过于频繁，请等待后重试。');
+  let credentials: Credentials;
+  try { credentials = parseBasicAuthorization(authorization); } catch { recordFailure(ip); throw unauthorized(); }
+  const user = db.prepare('SELECT id,password_hash FROM users WHERE normalized_email=?').get(credentials.email) as { id: string; password_hash: string } | undefined;
+  const dummyHash = 'scrypt$32768$8$3$AAAAAAAAAAAAAAAAAAAAAA$' + 'A'.repeat(86);
+  const valid = await verifyPassword(credentials.password, user?.password_hash ?? dummyHash);
+  if (valid && user) return { userId: user.id };
+  recordFailure(ip);
+  throw unauthorized();
+}
+export function resetBasicFailureStateForTests(): void { failures.clear(); }
+
+export function authorizeAgentRoute(db: Db, principal: AgentPrincipal, policy: AgentRoutePolicy | undefined, params: unknown): void {
+  if (!policy) throw forbidden('Basic 认证不允许访问此端点。');
+  if (policy.operation === 'identity') {
+    if (!db.prepare('SELECT 1 FROM users WHERE id=?').get(principal.userId)) throw unauthorized();
+    return;
   }
-}
-
-const scopeRank: Record<AgentScope, number> = { read: 0, write: 1, manage: 2 };
-const roleScope: Record<TeamRole, AgentScope> = { viewer: 'read', editor: 'write', admin: 'manage', owner: 'manage' };
-
-export function scopeAllows(actual: AgentScope, required: AgentScope): boolean {
-  return scopeRank[actual] >= scopeRank[required];
-}
-
-export function authenticateAgentToken(db: Db, token: string): AgentPrincipal {
-  if (!/^ts_agent_[A-Za-z0-9_-]{32,}$/.test(token)) throw unauthorized();
-  const row = db.prepare(`SELECT a.id,a.user_id,a.team_id,a.space_id,a.scope,m.role
-    FROM agent_tokens a JOIN members m ON m.team_id=a.team_id AND m.user_id=a.user_id
-    WHERE a.token_hash=? AND a.revoked_at IS NULL AND a.expires_at>?`)
-    .get(hashToken(token), isoNow()) as {
-      id: string; user_id: string; team_id: string; space_id: string | null; scope: AgentScope; role: TeamRole;
-    } | undefined;
-  if (!row) throw unauthorized();
-  if (row.space_id && !db.prepare('SELECT 1 FROM spaces WHERE id=? AND team_id=?').get(row.space_id, row.team_id)) throw unauthorized();
-  db.prepare('UPDATE agent_tokens SET last_used_at=? WHERE id=? AND revoked_at IS NULL').run(isoNow(), row.id);
-  return {
-    userId: row.user_id,
-    credentialId: row.id,
-    teamId: row.team_id,
-    spaceId: row.space_id,
-    scope: row.scope,
-    teamRole: row.role,
-  };
-}
-
-export function authorizeAgentRoute(
-  db: Db,
-  principal: AgentPrincipal,
-  policy: AgentRoutePolicy | undefined,
-  params: unknown,
-): void {
-  if (!policy) throw forbidden('Bearer 不允许访问此端点。');
-  const effective = scopeRank[principal.scope] <= scopeRank[roleScope[principal.teamRole]]
-    ? principal.scope : roleScope[principal.teamRole];
-  if (!scopeAllows(effective, policy.scope)) throw forbidden('Agent 凭据权限不足。');
   const routeParams = (params && typeof params === 'object' ? params : {}) as Record<string, unknown>;
+  let teamId: string | undefined;
   if (policy.teamParam) {
-    if (routeParams[policy.teamParam] !== principal.teamId) throw notFound();
+    const id = routeParams[policy.teamParam]; if (typeof id !== 'string') throw notFound(); teamId = id;
+  } else if (policy.spaceParam) {
+    const id = routeParams[policy.spaceParam]; if (typeof id !== 'string') throw notFound();
+    teamId = (db.prepare('SELECT team_id FROM spaces WHERE id=?').get(id) as { team_id: string } | undefined)?.team_id;
+  } else if (policy.documentParam) {
+    const id = routeParams[policy.documentParam]; if (typeof id !== 'string') throw notFound();
+    teamId = (db.prepare('SELECT s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?').get(id) as { team_id: string } | undefined)?.team_id;
+  } else if (policy.proposalParam) {
+    const id = routeParams[policy.proposalParam]; if (typeof id !== 'string') throw notFound();
+    teamId = (db.prepare('SELECT team_id FROM proposals WHERE id=?').get(id) as { team_id: string } | undefined)?.team_id;
+  } else if (policy.commentParam) {
+    const id = routeParams[policy.commentParam]; if (typeof id !== 'string') throw notFound();
+    teamId = (db.prepare('SELECT s.team_id FROM document_comments c JOIN documents d ON d.id=c.document_id JOIN spaces s ON s.id=d.space_id WHERE c.id=?').get(id) as { team_id: string } | undefined)?.team_id;
   }
-  if (principal.spaceId && !policy.allowSpaceBound) throw forbidden('空间限定凭据不能访问团队级操作。');
-  if (policy.spaceParam) {
-    const spaceId = routeParams[policy.spaceParam];
-    if (typeof spaceId !== 'string') throw notFound();
-    const space = db.prepare('SELECT team_id FROM spaces WHERE id=?').get(spaceId) as { team_id: string } | undefined;
-    if (!space || space.team_id !== principal.teamId) throw notFound();
-    if (principal.spaceId && principal.spaceId !== spaceId) throw notFound();
-  }
-  if (policy.proposalParam) {
-    const proposalId = routeParams[policy.proposalParam];
-    if (typeof proposalId !== 'string') throw notFound();
-    const proposal = db.prepare('SELECT team_id,space_id,author_id FROM proposals WHERE id=?').get(proposalId) as {team_id:string;space_id:string;author_id:string}|undefined;
-    if (!proposal || proposal.team_id !== principal.teamId || proposal.author_id !== principal.userId) throw notFound();
-    if (principal.spaceId && principal.spaceId !== proposal.space_id) throw notFound();
-  }  if (policy.commentParam) {
-    const commentId = routeParams[policy.commentParam];
-    if (typeof commentId !== 'string') throw notFound();
-    const comment = db.prepare(`SELECT d.id AS document_id,d.space_id,s.team_id FROM document_comments c JOIN documents d ON d.id=c.document_id JOIN spaces s ON s.id=d.space_id WHERE c.id=?`).get(commentId) as {document_id:string;space_id:string;team_id:string}|undefined;
-    if (!comment || comment.team_id !== principal.teamId) throw notFound();
-    if (principal.spaceId && comment.space_id !== principal.spaceId) throw notFound();
-  }  if (policy.documentParam) {
-    const documentId = routeParams[policy.documentParam];
-    if (typeof documentId !== 'string') throw notFound();
-    const document = db.prepare(`SELECT s.team_id,d.space_id FROM documents d
-      JOIN spaces s ON s.id=d.space_id WHERE d.id=?`).get(documentId) as { team_id: string; space_id: string } | undefined;
-    if (!document || document.team_id !== principal.teamId) throw notFound();
-    if (principal.spaceId && document.space_id !== principal.spaceId) throw notFound();
-  }
+  const role = teamId ? (db.prepare('SELECT role FROM members WHERE team_id=? AND user_id=?').get(teamId, principal.userId) as { role: TeamRole } | undefined)?.role : undefined;
+  if (!role) throw notFound();
+  const rank = (value: TeamRole | AgentRoutePolicy['scope']) => value === 'viewer' || value === 'read' ? 0 : value === 'editor' || value === 'write' ? 1 : 2;
+  if (rank(role) < rank(policy.scope)) throw forbidden('当前团队角色权限不足。');
 }
-
-export function principalFromRequest(request: FastifyRequest): AgentPrincipal | undefined {
-  return request.agentPrincipal;
-}
+export function principalFromRequest(request: FastifyRequest): AgentPrincipal | undefined { return request.agentPrincipal; }

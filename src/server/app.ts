@@ -14,7 +14,7 @@ import { registerAuthRoutes } from './auth.js';
 import { registerTeamRoutes } from './teams.js';
 import { registerContentRoutes } from './content.js';
 import { HttpError, unauthorized } from './errors.js';
-import { authenticateAgentToken, authorizeAgentRoute } from './agentAuth.js';
+import { authenticateBasicAccount, authorizeAgentRoute, parseBasicAuthorization } from './agentAuth.js';
 import { registerAgentCredentialRoutes } from './agentTokens.js';
 import { createTeamShelfMcpHandler } from './mcp.js';
 import { registerMailRoutes } from './mail.js';
@@ -32,6 +32,17 @@ export interface CreateAppOptions {
   logger?: boolean;
   serveClient?: boolean;
   mailSender?: MailSender;
+}
+
+function auditTeamId(db: Db, request: import('fastify').FastifyRequest, principal: { userId: string }): string | undefined {
+  const policy = request.routeOptions.config.agentAccess;
+  const params = request.params as Record<string, unknown>;
+  if (policy?.teamParam && typeof params[policy.teamParam] === 'string') return params[policy.teamParam] as string;
+  if (policy?.spaceParam && typeof params[policy.spaceParam] === 'string') { const id = params[policy.spaceParam] as string; return (db.prepare('SELECT team_id FROM spaces WHERE id=?').get(id) as { team_id: string } | undefined)?.team_id; }
+  if (policy?.documentParam && typeof params[policy.documentParam] === 'string') { const id = params[policy.documentParam] as string; return (db.prepare('SELECT s.team_id FROM documents d JOIN spaces s ON s.id=d.space_id WHERE d.id=?').get(id) as { team_id: string } | undefined)?.team_id; }
+  if (policy?.proposalParam && typeof params[policy.proposalParam] === 'string') { const id = params[policy.proposalParam] as string; return (db.prepare('SELECT team_id FROM proposals WHERE id=?').get(id) as { team_id: string } | undefined)?.team_id; }
+  if (policy?.commentParam && typeof params[policy.commentParam] === 'string') { const id = params[policy.commentParam] as string; return (db.prepare('SELECT s.team_id FROM document_comments c JOIN documents d ON d.id=c.document_id JOIN spaces s ON s.id=d.space_id WHERE c.id=?').get(id) as { team_id: string } | undefined)?.team_id; }
+  return (db.prepare('SELECT team_id FROM members WHERE user_id=? ORDER BY created_at,team_id LIMIT 1').get(principal.userId) as { team_id: string } | undefined)?.team_id;
 }
 
 export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fastify> {
@@ -75,10 +86,7 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     const authorization = request.headers.authorization;
     const isAgent = authorization !== undefined;
     if (isAgent) {
-      if (!authorization.startsWith('Bearer ') || request.headers.cookie !== undefined) throw unauthorized();
-      const principal = authenticateAgentToken(db, authorization.slice('Bearer '.length));
-      request.agentPrincipal = principal;
-      authorizeAgentRoute(db, principal, request.routeOptions.config.agentAccess, request.params);
+      if (request.headers.cookie !== undefined) throw unauthorized();
     }
     if (!isAgent && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       if (request.headers['x-requested-with'] !== 'TeamShelf') {
@@ -87,16 +95,15 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     }
   });
   app.addHook('preHandler', async (request) => {
-    if (!request.agentPrincipal) return;
-    const authorization = request.headers.authorization;
-    if (!authorization?.startsWith('Bearer ') || request.headers.cookie !== undefined) throw unauthorized();
-    const principal = authenticateAgentToken(db, authorization.slice('Bearer '.length));
-    request.agentPrincipal = principal;
+    if (!request.url.startsWith('/api/')) return;
+    if (request.headers.authorization === undefined) return;
+    const principal = await authenticateBasicAccount(db, request.headers.authorization, request.ip);
     authorizeAgentRoute(db, principal, request.routeOptions.config.agentAccess, request.params);
+    request.agentPrincipal = principal;
   });
   app.addHook('onResponse', async (request, reply) => {
     const principal = request.agentPrincipal;
-    if (!principal) return;
+    if (!principal || request.url.startsWith('/mcp')) return;
     try {
       const policy = request.routeOptions.config.agentAccess;
       const params = request.params as Record<string, unknown>;
@@ -104,12 +111,13 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
       const targetId = (policy?.documentParam && params[policy.documentParam])
         ?? (policy?.spaceParam && params[policy.spaceParam])
         ?? (policy?.teamParam && params[policy.teamParam])
-        ?? (request.url.startsWith('/mcp') ? undefined : principal.spaceId)
-        ?? principal.teamId;
+        ?? auditTeamId(db, request, principal);
+      const teamId = auditTeamId(db, request, principal);
+      if (!teamId) return;
       db.prepare(`INSERT INTO audit_events(id,team_id,actor_id,action,target_type,target_id,created_at,details_json)
-        VALUES(?,?,?,?,?,?,?,?)`).run(randomUUID(), principal.teamId, principal.userId,
-        `agent.${request.url.startsWith('/mcp') ? 'mcp.call' : policy?.operation ?? 'blocked.route'}`, targetType, typeof targetId === 'string' ? targetId : null,
-        new Date().toISOString(), JSON.stringify({ credentialId: principal.credentialId, route: request.routeOptions.url, method: request.method, statusCode: reply.statusCode }));
+        VALUES(?,?,?,?,?,?,?,?)`).run(randomUUID(), teamId, principal.userId,
+        `agent.${policy?.operation ?? 'blocked.route'}`, targetType, typeof targetId === 'string' ? targetId : null,
+        new Date().toISOString(), JSON.stringify({ authType: 'account_basic', route: request.routeOptions.url, method: request.method, statusCode: reply.statusCode }));
     } catch { /* Keep audit failures from changing an already-produced response. */ }
   });  app.addHook('onSend', async (request, reply, payload) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/mcp')) reply.header('cache-control', 'no-store');
@@ -119,10 +127,12 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
+      if (error.statusCode === 429) reply.header('retry-after', '60');
       return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     }
     const statusCode = (error as { statusCode?: number }).statusCode;
     if (statusCode === 429) {
+      reply.header('retry-after', '60');
       return reply.code(429).send({ error: { code: 'RATE_LIMITED', message: '请求过于频繁，请稍后重试。' } });
     }
     if ((error as { name?: string }).name === 'ZodError' || statusCode === 400) {
@@ -155,17 +165,17 @@ export function createApp(options: CreateAppOptions = {}): ReturnType<typeof Fas
     const origin = request.headers.origin;
     const authorization = request.headers.authorization;
     if (origin !== undefined && origin !== config.appOrigin) throw new HttpError(403, 'ORIGIN_REJECTED', '请求来源不允许。');
-    if (request.headers.cookie !== undefined || !authorization?.startsWith('Bearer ') || authorization.length <= 7) throw unauthorized();
+    if (request.headers.cookie !== undefined) throw unauthorized();
     if (!host) throw new HttpError(400, 'INVALID_HOST', '请求主机无效。');
     let hostname: string;
     try { const hostUrl = new URL('http://' + host); if (hostUrl.username || hostUrl.password || hostUrl.pathname !== '/' || hostUrl.search || hostUrl.hash) throw new Error('invalid host'); hostname = hostUrl.hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
     catch { throw new HttpError(400, 'INVALID_HOST', '请求主机无效。'); }
     const configuredHost = config.appOrigin ? new URL(config.appOrigin).hostname.toLowerCase().replace(/^\[|\]$/g, '') : '';
     if (hostname !== configuredHost && !['localhost', '127.0.0.1', '::1'].includes(hostname)) throw new HttpError(403, 'HOST_REJECTED', '请求主机不允许。');
-    const token = authorization.slice(7);
-    const principal = authenticateAgentToken(db, token);
+    const principal = await authenticateBasicAccount(db, authorization, request.ip);
+    const credentials = parseBasicAuthorization(authorization);
     request.agentPrincipal = principal;
-    const handler = createTeamShelfMcpHandler({ app, config, principal, token });
+    const handler = createTeamShelfMcpHandler({ app, config, db, principal, authorization: `Basic ${Buffer.from(`${credentials.email}:${credentials.password}`).toString('base64')}` });
     const headers = new Headers();
     for (const [key, value] of Object.entries(request.headers)) {
       if (typeof value === 'string' && key.toLowerCase() !== 'content-length' && key.toLowerCase() !== 'cookie') headers.set(key, value);
