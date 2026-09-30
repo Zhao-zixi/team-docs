@@ -218,7 +218,12 @@ test("real API flow: setup, mail invites, edit, ACL, conflict recovery and deep-
   const editor = page.locator(".ProseMirror");
   await expect(editor).toBeVisible();
   await editor.click(); await page.keyboard.press("End"); await page.keyboard.type(" 安全编辑");
-  await page.getByRole("button", { name: "粗体" }).click(); await page.keyboard.type("工具栏加粗");
+  const boldButton = page.getByRole("button", { name: "粗体" });
+  await boldButton.hover();
+  await page.mouse.down();
+  await expect.poll(() => editor.evaluate(element => document.activeElement === element)).toBe(true);
+  await page.mouse.up();
+  await page.keyboard.type("工具栏加粗");
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page.getByText(/已保存版本 · v2/)).toBeVisible();
   const saved = await page.evaluate(async id => (await (await fetch(`/api/documents/${id}`, { credentials: "same-origin" })).json()).document, publicDocId);
